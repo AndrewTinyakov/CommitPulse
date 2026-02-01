@@ -1,0 +1,20 @@
+{
+  "name": "commit-tracker",
+  "private": true,
+  "packageManager": "pnpm@10.28.1",
+  "scripts": {
+    "convex:codegen": "node scripts/convex-local.mjs codegen",
+    "convex:dev": "node scripts/convex-local.mjs dev",
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.2"
+  },
+  "devDependencies": {
+    "convex": "^1.27.0",
+    "turbo": "^2.3.0"
+  }
+}
