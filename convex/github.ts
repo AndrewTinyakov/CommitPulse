@@ -56,6 +56,12 @@ async function githubRequest<T>(token: string, url: string, timeoutMs = 12000) {
   }
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 409 && text.includes("Git Repository is empty")) {
+      throw new ConvexError({
+        code: "GITHUB_REPO_EMPTY",
+        message: "GitHub repository is empty",
+      });
+    }
     const message =
       response.status === 401
         ? "GitHub token is invalid or expired"
@@ -64,6 +70,8 @@ async function githubRequest<T>(token: string, url: string, timeoutMs = 12000) {
     throw new ConvexError({
       code: "GITHUB_API_ERROR",
       message,
+      status: response.status,
+      details: text,
     });
   }
   return (await response.json()) as T;
@@ -144,6 +152,11 @@ async function fetchPaged<T>(token: string, url: string, limit = 5) {
 }
 
 type ContributionDay = { date: string; contributionCount: number };
+
+function isEmptyRepoError(error: unknown) {
+  const data = (error as { data?: { code?: string } } | null)?.data;
+  return data?.code === "GITHUB_REPO_EMPTY";
+}
 
 async function fetchContributionDays(token: string, from: Date, to: Date) {
   const query = `
@@ -583,11 +596,19 @@ async function syncUser(
   for (const repo of repos.slice(0, repoLimit)) {
     if (repo.archived || repo.disabled) continue;
     reposProcessed += 1;
-    const commits = await fetchPaged<{ sha: string }>(
-      connection.token,
-      `${GITHUB_API}/repos/${repo.full_name}/commits?author=${connection.login}&since=${since}`,
-      commitPageLimit,
-    );
+    let commits: { sha: string }[] = [];
+    try {
+      commits = await fetchPaged<{ sha: string }>(
+        connection.token,
+        `${GITHUB_API}/repos/${repo.full_name}/commits?author=${connection.login}&since=${since}`,
+        commitPageLimit,
+      );
+    } catch (error) {
+      if (isEmptyRepoError(error)) {
+        continue;
+      }
+      throw error;
+    }
 
     for (const commit of commits) {
       const detail = await githubRequest<{

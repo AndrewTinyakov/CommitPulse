@@ -73,7 +73,7 @@ export default function GitHubConnectCard() {
   };
 
   return (
-    <div className="panel flex flex-col rounded-3xl px-6 py-6">
+    <div className="panel flex h-full flex-col rounded-3xl px-6 py-6">
       <div className="flex items-center gap-3">
         <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(81,214,255,0.3)] bg-[rgba(81,214,255,0.12)] text-[var(--accent-2)]">
           <GitBranch className="h-4 w-4" />
@@ -157,7 +157,7 @@ export default function GitHubConnectCard() {
       )}
 
       <div className="mt-4">
-        <div className="rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.35)] p-4 text-sm">
+        <div className="flex h-full flex-col rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.35)] p-4 text-sm">
           <p className="headline text-[10px] uppercase tracking-[0.25em] text-[var(--muted)]">
             Connection status
           </p>
@@ -182,7 +182,7 @@ export default function GitHubConnectCard() {
               </span>
             </div>
           </div>
-          <div className="mt-4 flex flex-wrap gap-3">
+          <div className="mt-auto flex flex-wrap gap-3 pt-4">
             {isConnected && !showTokenEditor && (
               <button
                 onClick={() => setEditing(true)}

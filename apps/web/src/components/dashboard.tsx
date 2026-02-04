@@ -507,7 +507,7 @@ function DashboardShell({
               title="Connections"
               description="Update tokens, sync status, or disconnect a service."
             >
-              <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
+              <div className="grid gap-6 lg:grid-cols-2 lg:items-stretch">
                 <GitHubConnectCard />
                 <TelegramConnectCard />
               </div>
