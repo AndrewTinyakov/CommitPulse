@@ -1,6 +1,5 @@
 'use node';
 
-import { Telegraf } from "telegraf";
 import { ConvexError, v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -8,6 +7,36 @@ import { requireUserId } from "./auth";
 
 const DEFAULT_REMINDER_GAP_MS = 6 * 60 * 60 * 1000;
 const RECENT_COMMIT_GRACE_MS = 90 * 60 * 1000;
+const TELEGRAM_API_BASE = "https://api.telegram.org";
+
+function getBotToken() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    throw new ConvexError({
+      code: "MISSING_TELEGRAM_TOKEN",
+      message: "Missing TELEGRAM_BOT_TOKEN",
+    });
+  }
+  return token;
+}
+
+async function sendTelegramMessage(token: string, chatId: string, text: string) {
+  const response = await fetch(`${TELEGRAM_API_BASE}/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new ConvexError({
+      code: "TELEGRAM_SEND_FAILED",
+      message: `Telegram send failed (${response.status}): ${body}`,
+    });
+  }
+}
 
 function hourInTimeZone(timestamp: number, timeZone: string) {
   const formatter = new Intl.DateTimeFormat("en-US", {
@@ -26,45 +55,6 @@ function isQuietHour(hour: number, start?: number | null, end?: number | null) {
   return hour >= start || hour < end;
 }
 
-export const connect = action({
-  args: {
-    botToken: v.string(),
-    chatId: v.string(),
-  },
-  returns: v.object({ ok: v.boolean() }),
-  handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
-
-    const existing = await ctx.runQuery(internal.telegram.getConnectionInternal, {
-      userId,
-    });
-    const goals = await ctx.runQuery(internal.telegram.getGoalsForUser, {
-      userId,
-    });
-    const quietHoursStart = existing?.quietHoursStart ?? 22;
-    const quietHoursEnd = existing?.quietHoursEnd ?? 7;
-    const timezone = existing?.timezone ?? goals?.timezone ?? "UTC";
-
-    const bot = new Telegraf(args.botToken);
-    await bot.telegram.getMe();
-    await bot.telegram.sendMessage(
-      args.chatId,
-      "CommitPulse connected. You will get smart nudges when it makes sense.",
-    );
-
-    await ctx.runMutation(internal.telegram.upsertConnection, {
-      userId,
-      botToken: args.botToken,
-      chatId: args.chatId,
-      quietHoursStart,
-      quietHoursEnd,
-      timezone,
-    });
-
-    return { ok: true };
-  },
-});
-
 export const sendTestMessage = action({
   args: {},
   returns: v.object({ ok: v.boolean() }),
@@ -80,8 +70,8 @@ export const sendTestMessage = action({
       });
     }
 
-    const bot = new Telegraf(connection.botToken);
-    await bot.telegram.sendMessage(connection.chatId, "CommitPulse test message ✅");
+    const token = getBotToken();
+    await sendTelegramMessage(token, connection.chatId, "CommitPulse test message ✅");
     return { ok: true };
   },
 });
@@ -91,6 +81,7 @@ export const sendSmartReminders = internalAction({
   returns: v.object({ ok: v.boolean(), notified: v.number() }),
   handler: async (ctx) => {
     const connections = await ctx.runQuery(internal.telegram.listConnections, {});
+    const token = getBotToken();
     let notified = 0;
     for (const connection of connections) {
       const reminderContext = await ctx.runQuery(internal.telegram.getReminderContext, {
@@ -106,13 +97,12 @@ export const sendSmartReminders = internalAction({
         timeZone,
         quietHoursStart,
         quietHoursEnd,
-        botToken,
         chatId,
         lastCommitAt,
       } = reminderContext;
 
       const now = Date.now();
-      if (!botToken || !chatId) continue;
+      if (!chatId) continue;
       const hour = hourInTimeZone(now, timeZone);
       const isQuiet = isQuietHour(hour, quietHoursStart, quietHoursEnd);
       if (isQuiet) continue;
@@ -156,8 +146,7 @@ export const sendSmartReminders = internalAction({
         `Goal: ${commitGoal} commits / ${locGoal} LOC.\n` +
         `Remaining: ${remainingCommits} commits, ${remainingLoc} LOC.`;
 
-      const bot = new Telegraf(botToken);
-      await bot.telegram.sendMessage(chatId, message);
+      await sendTelegramMessage(token, chatId, message);
       await ctx.runMutation(internal.telegram.markNotified, {
         userId: connection.userId,
         timestamp: now,

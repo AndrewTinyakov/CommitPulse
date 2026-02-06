@@ -1,7 +1,7 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { getUserId, requireUserId } from "./auth";
-import { clamp, maskToken, toDateKey } from "./lib";
+import { clamp, toDateKey } from "./lib";
 
 const goalsValidator = v.object({
   commitsPerDay: v.number(),
@@ -32,8 +32,9 @@ export const getConnection = query({
     v.object({
       connected: v.boolean(),
       enabled: v.boolean(),
+      telegramUserId: v.string(),
       chatId: v.string(),
-      botTokenMasked: v.union(v.string(), v.null()),
+      telegramUsername: v.union(v.string(), v.null()),
       timezone: v.union(v.string(), v.null()),
       quietHoursStart: v.union(v.number(), v.null()),
       quietHoursEnd: v.union(v.number(), v.null()),
@@ -51,11 +52,13 @@ export const getConnection = query({
     if (!connection) {
       return null;
     }
+    const telegramUserId = connection.telegramUserId ?? connection.chatId;
     return {
       connected: true,
       enabled: connection.enabled,
+      telegramUserId,
       chatId: connection.chatId,
-      botTokenMasked: maskToken(connection.botToken),
+      telegramUsername: connection.telegramUsername ?? null,
       timezone: connection.timezone ?? null,
       quietHoursStart: connection.quietHoursStart ?? null,
       quietHoursEnd: connection.quietHoursEnd ?? null,
@@ -97,11 +100,14 @@ export const updateSettings = mutation({
 const upsertConnection = internalMutation({
   args: {
     userId: v.string(),
-    botToken: v.string(),
+    telegramUserId: v.string(),
     chatId: v.string(),
-    quietHoursStart: v.number(),
-    quietHoursEnd: v.number(),
-    timezone: v.string(),
+    telegramUsername: v.union(v.string(), v.null()),
+    telegramFirstName: v.union(v.string(), v.null()),
+    telegramLastName: v.union(v.string(), v.null()),
+    quietHoursStart: v.union(v.number(), v.null()),
+    quietHoursEnd: v.union(v.number(), v.null()),
+    timezone: v.union(v.string(), v.null()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -112,11 +118,14 @@ const upsertConnection = internalMutation({
 
     const payload = {
       userId: args.userId,
-      botToken: args.botToken,
+      telegramUserId: args.telegramUserId,
       chatId: args.chatId,
-      quietHoursStart: args.quietHoursStart,
-      quietHoursEnd: args.quietHoursEnd,
-      timezone: args.timezone,
+      telegramUsername: args.telegramUsername ?? undefined,
+      telegramFirstName: args.telegramFirstName ?? undefined,
+      telegramLastName: args.telegramLastName ?? undefined,
+      quietHoursStart: args.quietHoursStart ?? existing?.quietHoursStart ?? 22,
+      quietHoursEnd: args.quietHoursEnd ?? existing?.quietHoursEnd ?? 7,
+      timezone: args.timezone ?? existing?.timezone ?? "UTC",
       enabled: true,
       connectedAt: Date.now(),
     };
@@ -135,8 +144,11 @@ const listConnections = internalQuery({
   returns: v.array(
     v.object({
       userId: v.string(),
-      botToken: v.string(),
+      telegramUserId: v.string(),
       chatId: v.string(),
+      telegramUsername: v.union(v.string(), v.null()),
+      telegramFirstName: v.union(v.string(), v.null()),
+      telegramLastName: v.union(v.string(), v.null()),
       quietHoursStart: v.union(v.number(), v.null()),
       quietHoursEnd: v.union(v.number(), v.null()),
       timezone: v.union(v.string(), v.null()),
@@ -148,8 +160,11 @@ const listConnections = internalQuery({
     const connections = await ctx.db.query("telegramConnections").collect();
     return connections.map((connection) => ({
       userId: connection.userId,
-      botToken: connection.botToken,
+      telegramUserId: connection.telegramUserId ?? connection.chatId,
       chatId: connection.chatId,
+      telegramUsername: connection.telegramUsername ?? null,
+      telegramFirstName: connection.telegramFirstName ?? null,
+      telegramLastName: connection.telegramLastName ?? null,
       quietHoursStart: connection.quietHoursStart ?? null,
       quietHoursEnd: connection.quietHoursEnd ?? null,
       timezone: connection.timezone ?? null,
@@ -164,8 +179,11 @@ const getConnectionInternal = internalQuery({
   returns: v.union(
     v.object({
       userId: v.string(),
-      botToken: v.string(),
+      telegramUserId: v.string(),
       chatId: v.string(),
+      telegramUsername: v.union(v.string(), v.null()),
+      telegramFirstName: v.union(v.string(), v.null()),
+      telegramLastName: v.union(v.string(), v.null()),
       enabled: v.boolean(),
       quietHoursStart: v.union(v.number(), v.null()),
       quietHoursEnd: v.union(v.number(), v.null()),
@@ -180,15 +198,41 @@ const getConnectionInternal = internalQuery({
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
     if (!connection) return null;
+    const telegramUserId = connection.telegramUserId ?? connection.chatId;
     return {
       userId: connection.userId,
-      botToken: connection.botToken,
+      telegramUserId,
       chatId: connection.chatId,
+      telegramUsername: connection.telegramUsername ?? null,
+      telegramFirstName: connection.telegramFirstName ?? null,
+      telegramLastName: connection.telegramLastName ?? null,
       enabled: connection.enabled,
       quietHoursStart: connection.quietHoursStart ?? null,
       quietHoursEnd: connection.quietHoursEnd ?? null,
       timezone: connection.timezone ?? null,
       lastNotifiedAt: connection.lastNotifiedAt ?? null,
+    };
+  },
+});
+
+const getConnectionByTelegramUserId = internalQuery({
+  args: { telegramUserId: v.string() },
+  returns: v.union(
+    v.object({
+      userId: v.string(),
+      telegramUserId: v.string(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const connection = await ctx.db
+      .query("telegramConnections")
+      .withIndex("by_telegram_user", (q) => q.eq("telegramUserId", args.telegramUserId))
+      .first();
+    if (!connection) return null;
+    return {
+      userId: connection.userId,
+      telegramUserId: connection.telegramUserId ?? connection.chatId,
     };
   },
 });
@@ -230,7 +274,6 @@ const getReminderContext = internalQuery({
   args: { userId: v.string() },
   returns: v.union(
     v.object({
-      botToken: v.string(),
       chatId: v.string(),
       quietHoursStart: v.union(v.number(), v.null()),
       quietHoursEnd: v.union(v.number(), v.null()),
@@ -275,7 +318,6 @@ const getReminderContext = internalQuery({
       .first();
 
     return {
-      botToken: connection.botToken,
       chatId: connection.chatId,
       quietHoursStart: connection.quietHoursStart ?? null,
       quietHoursEnd: connection.quietHoursEnd ?? null,
@@ -302,6 +344,7 @@ const getReminderContext = internalQuery({
 
 export {
   getConnectionInternal,
+  getConnectionByTelegramUserId,
   getGoalsForUser,
   getReminderContext,
   listConnections,

@@ -63,6 +63,8 @@ type GitHubStatus = {
 type TelegramStatus = {
   connected: boolean;
   enabled?: boolean | null;
+  telegramUserId?: string | null;
+  telegramUsername?: string | null;
   chatId?: string | null;
   quietHoursStart?: number | null;
   quietHoursEnd?: number | null;

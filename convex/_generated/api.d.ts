@@ -15,6 +15,7 @@ import type * as github from "../github.js";
 import type * as goals from "../goals.js";
 import type * as lib from "../lib.js";
 import type * as telegram from "../telegram.js";
+import type * as telegramAuth from "../telegramAuth.js";
 import type * as telegramNode from "../telegramNode.js";
 
 import type {
@@ -31,6 +32,7 @@ declare const fullApi: ApiFromModules<{
   goals: typeof goals;
   lib: typeof lib;
   telegram: typeof telegram;
+  telegramAuth: typeof telegramAuth;
   telegramNode: typeof telegramNode;
 }>;
 
