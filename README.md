@@ -56,7 +56,24 @@ This ensures Convex backend changes are pushed before the Next.js production bui
 
 ## GitHub
 
-Generate a Fine-grained PAT with `repo` + `read:user` scopes. Paste it in the UI to sync commits.
+Create a GitHub App and connect through the in-app `Connect GitHub` flow.
+
+Required env vars:
+- `GITHUB_APP_ID`
+- `GITHUB_APP_CLIENT_ID`
+- `GITHUB_APP_CLIENT_SECRET`
+- `GITHUB_APP_PRIVATE_KEY` (single line or `\\n` escaped PEM)
+- `GITHUB_APP_WEBHOOK_SECRET`
+- `GITHUB_APP_SLUG` (the app slug from `github.com/apps/<slug>`)
+- `GITHUB_APP_STATE_SECRET` (optional, defaults to `GITHUB_APP_CLIENT_SECRET`)
+
+GitHub App settings:
+- Setup URL: `https://<your-app>.vercel.app/api/github/setup`
+- Webhook URL: `https://<your-app>.vercel.app/api/github/webhook`
+- Permissions: repository `Contents: Read-only`, `Metadata: Read-only`
+- Events: `push`, `installation`, `installation_repositories`
+
+GitHub App is the only supported connection method.
 
 ## Telegram
 

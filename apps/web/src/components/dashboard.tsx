@@ -57,6 +57,9 @@ type ActivityItem = {
 type GitHubStatus = {
   connected: boolean;
   login?: string | null;
+  installationAccountLogin?: string | null;
+  repoSelectionMode?: "selected" | "all" | null;
+  syncStatus?: "idle" | "syncing" | "error" | null;
   lastSync?: string | null;
 };
 
@@ -102,7 +105,7 @@ function RemoteDashboard() {
     api.dashboard.getActivity,
     signedIn ? { limit: 6 } : "skip",
   );
-  const github = useQuery(api.github.getConnection, signedIn ? {} : "skip");
+  const github = useQuery(api.github.getConnectionV2, signedIn ? {} : "skip");
   const telegram = useQuery(api.telegram.getConnection, signedIn ? {} : "skip");
 
   return (
@@ -143,11 +146,9 @@ function DashboardShell({
   const paceLabel = paceScore >= 1 ? "On target" : paceScore >= 0.6 ? "Catching up" : "Behind";
   const signedInReady = authLoaded && signedIn;
 
-  const mounted = useMounted();
-  const lastReminder =
-    mounted && telegram.lastNotifiedAt
-      ? `${formatDistanceToNowStrict(telegram.lastNotifiedAt)} ago`
-      : "—";
+  const lastReminder = telegram.lastNotifiedAt
+    ? `${formatDistanceToNowStrict(telegram.lastNotifiedAt)} ago`
+    : "—";
 
   const sizeBuckets = useMemo(() => {
     const buckets = { small: 0, medium: 0, large: 0 };
@@ -229,7 +230,13 @@ function DashboardShell({
                       <ConnectionSnapshot
                         icon={<PlugZap className="h-3.5 w-3.5 text-[var(--accent-2)]" />}
                         label="GitHub account"
-                        value={github.login ? `Connected as ${github.login}` : "Connected"}
+                        value={
+                          github.installationAccountLogin
+                            ? `Connected to ${github.installationAccountLogin}`
+                            : github.login
+                              ? `Connected as ${github.login}`
+                              : "Connected"
+                        }
                       />
                       <ConnectionSnapshot
                         icon={<Bell className="h-3.5 w-3.5 text-[var(--accent)]" />}
@@ -246,6 +253,17 @@ function DashboardShell({
                         label="Last sync"
                         value={github.lastSync ? `Last sync ${github.lastSync}` : "Last sync pending"}
                         valueClassName="text-[var(--text)] tabular-nums"
+                      />
+                      <ConnectionSnapshot
+                        icon={<CloudLightning className="h-3.5 w-3.5 text-[var(--accent)]" />}
+                        label="Repo scope"
+                        value={
+                          github.repoSelectionMode === "all"
+                            ? "All repos"
+                            : github.repoSelectionMode === "selected"
+                              ? "Selected repos"
+                              : "Pending selection"
+                        }
                       />
                       <div className="mt-2 flex flex-wrap gap-2">
                         <button
@@ -275,7 +293,7 @@ function DashboardShell({
                       <p className="mt-2 text-xs text-[var(--muted)]">
                         {signedInReady
                           ? "We'll start syncing commits within a few minutes."
-                          : "We'll ask for a token after you sign in."}
+                          : "After sign in, connect GitHub App to start auto-sync."}
                       </p>
                       <a
                         href="#github-connect"
@@ -508,7 +526,7 @@ function DashboardShell({
               open={connectionsOpen}
               onClose={() => setConnectionsOpen(false)}
               title="Connections"
-              description="Update tokens, sync status, or disconnect a service."
+              description="Manage GitHub App and sync status, or disconnect a service."
             >
               <div className="grid gap-6 lg:grid-cols-2 lg:items-stretch">
                 <GitHubConnectCard />
@@ -751,16 +769,6 @@ function StatusRow({
       </span>
     </div>
   );
-}
-
-function useMounted() {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  return mounted;
 }
 
 function ReminderTooltip() {

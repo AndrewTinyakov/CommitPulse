@@ -1,270 +1,45 @@
 import { ConvexError, v } from "convex/values";
 import {
   action,
-  internalAction,
   internalMutation,
   internalQuery,
   mutation,
   query,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { formatLastSync, maskToken, toDateKey, uniquePush } from "./lib";
+import { formatLastSync, toDateKey, uniquePush } from "./lib";
 import { getUserId, requireUserId } from "./auth";
 
-const GITHUB_API = "https://api.github.com";
-const GITHUB_GRAPHQL_API = "https://api.github.com/graphql";
-const HISTORY_BACKFILL_DAYS = 90;
-const HISTORY_BACKFILL_WINDOW_MS = HISTORY_BACKFILL_DAYS * 24 * 60 * 60 * 1000;
-const SYNC_SAFETY_WINDOW_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_REPO_PAGE_LIMIT = 3;
-const DEFAULT_REPO_LIMIT = 50;
-const DEFAULT_COMMIT_PAGE_LIMIT = 2;
-const HISTORY_REPO_PAGE_LIMIT = 4;
-const HISTORY_REPO_LIMIT = 120;
-const HISTORY_COMMIT_PAGE_LIMIT = 4;
-const STREAK_REFRESH_WINDOW_MS = 6 * 60 * 60 * 1000;
-const STREAK_LOOKBACK_DAYS = 1200;
-const STREAK_WINDOW_DAYS = 370;
+const MAX_JOB_ATTEMPTS = 6;
 
-async function githubRequest<T>(token: string, url: string, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "commit-tracker",
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-  } catch (error: any) {
-    if (error?.name === "AbortError") {
-      throw new ConvexError({
-        code: "GITHUB_TIMEOUT",
-        message: "GitHub request timed out",
-      });
-    }
-    throw new ConvexError({
-      code: "GITHUB_REQUEST_FAILED",
-      message: "GitHub request failed",
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (!response.ok) {
-    const text = await response.text();
-    if (response.status === 409 && text.includes("Git Repository is empty")) {
-      throw new ConvexError({
-        code: "GITHUB_REPO_EMPTY",
-        message: "GitHub repository is empty",
-      });
-    }
-    const message =
-      response.status === 401
-        ? "GitHub token is invalid or expired"
-        : `GitHub API error (${response.status})`;
-    console.warn("GitHub API error", response.status, text);
-    throw new ConvexError({
-      code: "GITHUB_API_ERROR",
-      message,
-      status: response.status,
-      details: text,
-    });
-  }
-  return (await response.json()) as T;
-}
-
-async function githubGraphqlRequest<T>(
-  token: string,
-  query: string,
-  variables: Record<string, unknown>,
-  timeoutMs = 12000,
-) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  let response: Response;
-  try {
-    response = await fetch(GITHUB_GRAPHQL_API, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "commit-tracker",
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-      body: JSON.stringify({ query, variables }),
-    });
-  } catch (error: any) {
-    if (error?.name === "AbortError") {
-      throw new ConvexError({
-        code: "GITHUB_TIMEOUT",
-        message: "GitHub request timed out",
-      });
-    }
-    throw new ConvexError({
-      code: "GITHUB_REQUEST_FAILED",
-      message: "GitHub request failed",
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-  if (!response.ok) {
-    const text = await response.text();
-    const message =
-      response.status === 401
-        ? "GitHub token is invalid or expired"
-        : `GitHub API error (${response.status})`;
-    console.warn("GitHub GraphQL error", response.status, text);
-    throw new ConvexError({
-      code: "GITHUB_API_ERROR",
-      message,
-    });
-  }
-  const payload = (await response.json()) as { data?: T; errors?: { message: string }[] };
-  if (payload.errors?.length) {
-    console.warn("GitHub GraphQL error payload", payload.errors);
-    throw new ConvexError({
-      code: "GITHUB_API_ERROR",
-      message: payload.errors[0]?.message ?? "GitHub GraphQL error",
-    });
-  }
-  return payload.data as T;
-}
-
-async function fetchPaged<T>(token: string, url: string, limit = 5) {
-  const results: T[] = [];
-  for (let page = 1; page <= limit; page += 1) {
-    const pageUrl = url.includes("?") ? `${url}&per_page=100&page=${page}` : `${url}?per_page=100&page=${page}`;
-    const data = await githubRequest<T[]>(token, pageUrl);
-    if (data.length === 0) {
-      break;
-    }
-    results.push(...data);
-    if (data.length < 100) {
-      break;
-    }
-  }
-  return results;
-}
-
-type ContributionDay = { date: string; contributionCount: number };
-
-function isEmptyRepoError(error: unknown) {
-  const data = (error as { data?: { code?: string } } | null)?.data;
-  return data?.code === "GITHUB_REPO_EMPTY";
-}
-
-async function fetchContributionDays(token: string, from: Date, to: Date) {
-  const query = `
-    query($from: DateTime!, $to: DateTime!) {
-      viewer {
-        contributionsCollection(from: $from, to: $to) {
-          contributionCalendar {
-            weeks {
-              contributionDays {
-                date
-                contributionCount
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-  const data = await githubGraphqlRequest<{
-    viewer: {
-      contributionsCollection: {
-        contributionCalendar: { weeks: { contributionDays: ContributionDay[] }[] };
-      } | null;
-    } | null;
-  }>(token, query, { from: from.toISOString(), to: to.toISOString() });
-
-  const weeks = data.viewer?.contributionsCollection?.contributionCalendar?.weeks ?? [];
-  return weeks.flatMap((week) => week.contributionDays);
-}
-
-async function computeContributionStreak(token: string) {
-  const dayMs = 24 * 60 * 60 * 1000;
-  const toDayStamp = (dateKey: string) => new Date(`${dateKey}T00:00:00Z`).getTime();
-
-  let streakDays = 0;
-  let lastDate: string | null = null;
-  let skipDate: string | null = null;
-  let cursor = new Date();
-  let remainingDays = STREAK_LOOKBACK_DAYS;
-
-  while (remainingDays > 0) {
-    const windowDays = Math.min(STREAK_WINDOW_DAYS, remainingDays);
-    const from = new Date(cursor.getTime() - (windowDays - 1) * dayMs);
-    const days = await fetchContributionDays(token, from, cursor);
-    if (days.length === 0) {
-      break;
-    }
-    const sorted = [...days].sort((a, b) => (a.date < b.date ? 1 : -1));
-    if (!skipDate) {
-      const latest = sorted[0];
-      if (latest && latest.contributionCount === 0) {
-        skipDate = latest.date;
-      }
-    }
-
-    for (const day of sorted) {
-      if (lastDate && day.date > lastDate) {
-        continue;
-      }
-      if (skipDate && day.date === skipDate && day.contributionCount === 0) {
-        lastDate = day.date;
-        skipDate = null;
-        continue;
-      }
-      if (day.contributionCount === 0) {
-        return streakDays;
-      }
-      if (!lastDate) {
-        streakDays = 1;
-        lastDate = day.date;
-        continue;
-      }
-      if (day.date === lastDate) {
-        continue;
-      }
-      const diffDays = Math.round((toDayStamp(lastDate) - toDayStamp(day.date)) / dayMs);
-      if (diffDays !== 1) {
-        return streakDays;
-      }
-      streakDays = streakDays === 0 ? 1 : streakDays + 1;
-      lastDate = day.date;
-    }
-
-    const oldest = sorted[sorted.length - 1];
-    if (!oldest) {
-      break;
-    }
-    cursor = new Date(toDayStamp(oldest.date) - dayMs);
-    remainingDays -= windowDays;
-  }
-
-  return streakDays;
-}
-
-export const connectWithToken = action({
-  args: { token: v.string() },
-  returns: v.object({ login: v.string() }),
+export const completeGithubAppSetup = action({
+  args: {
+    installationId: v.number(),
+    installationAccountLogin: v.string(),
+    installationAccountType: v.union(v.literal("User"), v.literal("Organization")),
+    repoSelectionMode: v.optional(v.union(v.literal("selected"), v.literal("all"))),
+  },
+  returns: v.object({ connected: v.boolean() }),
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
-    const user = await githubRequest<{ login: string }>(args.token, `${GITHUB_API}/user`);
-
-    await ctx.runMutation(internal.github.upsertConnection, {
+    await ctx.runMutation(internal.github.upsertAppConnection, {
       userId,
-      token: args.token,
-      login: user.login,
+      installationId: args.installationId,
+      installationAccountLogin: args.installationAccountLogin,
+      installationAccountType: args.installationAccountType,
+      repoSelectionMode: args.repoSelectionMode ?? "selected",
     });
 
-    return { login: user.login };
+    await ctx.runMutation(internal.github.enqueueSyncJob, {
+      userId,
+      installationId: args.installationId,
+      reason: "initial_backfill",
+      runAfter: Date.now(),
+      status: "pending",
+      attempt: 0,
+    });
+
+    return { connected: true };
   },
 });
 
@@ -292,7 +67,6 @@ export const getConnection = query({
       login: v.union(v.string(), v.null()),
       lastSync: v.union(v.string(), v.null()),
       lastSyncedAt: v.union(v.number(), v.null()),
-      tokenMasked: v.union(v.string(), v.null()),
     }),
     v.null(),
   ),
@@ -311,121 +85,282 @@ export const getConnection = query({
         login: null,
         lastSync: null,
         lastSyncedAt: null,
-        tokenMasked: null,
-      } as const;
+      };
     }
     return {
-      login: connection.githubLogin ?? "unknown",
+      login: connection.githubLogin ?? connection.installationAccountLogin ?? "unknown",
       lastSync: formatLastSync(connection.lastSyncedAt),
       connected: true,
       lastSyncedAt: connection.lastSyncedAt ?? null,
-      tokenMasked: maskToken(connection.accessToken),
     };
   },
 });
 
-export const syncNow: ReturnType<typeof action> = action({
+export const getConnectionV2 = query({
   args: {},
-  returns: v.object({ commits: v.number(), repos: v.number() }),
+  returns: v.union(
+    v.object({
+      connected: v.boolean(),
+      authMode: v.union(v.literal("github_app"), v.null()),
+      login: v.union(v.string(), v.null()),
+      installationId: v.union(v.number(), v.null()),
+      installationAccountLogin: v.union(v.string(), v.null()),
+      installationAccountType: v.union(v.literal("User"), v.literal("Organization"), v.null()),
+      repoSelectionMode: v.union(v.literal("selected"), v.literal("all"), v.null()),
+      syncStatus: v.union(v.literal("idle"), v.literal("syncing"), v.literal("error"), v.null()),
+      lastSync: v.union(v.string(), v.null()),
+      lastSyncedAt: v.union(v.number(), v.null()),
+      syncedFromAt: v.union(v.number(), v.null()),
+      syncedToAt: v.union(v.number(), v.null()),
+      lastWebhookAt: v.union(v.number(), v.null()),
+      lastErrorCode: v.union(v.string(), v.null()),
+      lastErrorMessage: v.union(v.string(), v.null()),
+    }),
+    v.null(),
+  ),
   handler: async (ctx) => {
-    const userId = await requireUserId(ctx);
-    const connection = await ctx.runQuery(internal.github.getConnectionInternal, {
-      userId,
-    });
-    if (!connection || !connection.connected || !connection.token) {
+    const userId = await getUserId(ctx);
+    if (!userId) return null;
+
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+
+    if (!connection) {
+      return {
+        connected: false,
+        authMode: null,
+        login: null,
+        installationId: null,
+        installationAccountLogin: null,
+        installationAccountType: null,
+        repoSelectionMode: null,
+        syncStatus: null,
+        lastSync: null,
+        lastSyncedAt: null,
+        syncedFromAt: null,
+        syncedToAt: null,
+        lastWebhookAt: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      };
+    }
+
+    return {
+      connected: true,
+      authMode: "github_app" as const,
+      login: connection.githubLogin ?? connection.installationAccountLogin ?? null,
+      installationId: connection.installationId ?? null,
+      installationAccountLogin: connection.installationAccountLogin ?? null,
+      installationAccountType: connection.installationAccountType ?? null,
+      repoSelectionMode: connection.repoSelectionMode ?? null,
+      syncStatus: connection.syncStatus ?? "idle",
+      lastSync: formatLastSync(connection.lastSyncedAt),
+      lastSyncedAt: connection.lastSyncedAt ?? null,
+      syncedFromAt: connection.syncedFromAt ?? null,
+      syncedToAt: connection.syncedToAt ?? null,
+      lastWebhookAt: connection.lastWebhookAt ?? null,
+      lastErrorCode: connection.lastErrorCode ?? null,
+      lastErrorMessage: connection.lastErrorMessage ?? null,
+    };
+  },
+});
+
+export const ingestWebhookEvent = mutation({
+  args: {
+    secret: v.string(),
+    deliveryId: v.string(),
+    event: v.string(),
+    installationId: v.optional(v.number()),
+    repoFullName: v.optional(v.string()),
+    setupAction: v.optional(v.string()),
+  },
+  returns: v.object({ accepted: v.boolean(), duplicate: v.boolean() }),
+  handler: async (ctx, args) => {
+    const expected = process.env.GITHUB_APP_WEBHOOK_SECRET;
+    if (!expected || args.secret !== expected) {
       throw new ConvexError({
-        code: "NO_GITHUB_CONNECTION",
-        message: "No GitHub connection",
+        code: "UNAUTHORIZED",
+        message: "Webhook forward secret mismatch",
       });
     }
-    return await syncUser(
-      ctx,
-      {
-        userId,
-        token: connection.token,
-        login: connection.login,
-        lastSyncedAt: connection.lastSyncedAt,
-        historySyncedAt: connection.historySyncedAt,
-        streakUpdatedAt: connection.streakUpdatedAt,
-      },
-      { forceStreakRefresh: true },
-    );
-  },
-});
 
-export const syncAll = internalAction({
-  args: {},
-  returns: v.object({ commits: v.number() }),
-  handler: async (ctx) => {
-    const connections = await ctx.runQuery(internal.github.listConnections, {});
-    let totalCommits = 0;
-    for (const connection of connections) {
-      const result = await syncUser(ctx, connection);
-      totalCommits += result.commits;
+    const duplicate = await ctx.db
+      .query("githubWebhookDeliveries")
+      .withIndex("by_delivery", (q) => q.eq("deliveryId", args.deliveryId))
+      .first();
+    if (duplicate) {
+      return { accepted: true, duplicate: true };
     }
-    return { commits: totalCommits };
+
+    const now = Date.now();
+    await ctx.db.insert("githubWebhookDeliveries", {
+      deliveryId: args.deliveryId,
+      event: args.event,
+      installationId: args.installationId,
+      receivedAt: now,
+    });
+
+    if (!args.installationId) {
+      return { accepted: true, duplicate: false };
+    }
+
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_installation", (q) => q.eq("installationId", args.installationId))
+      .first();
+
+    if (!connection) {
+      return { accepted: true, duplicate: false };
+    }
+
+    await ctx.db.patch(connection._id, { lastWebhookAt: now });
+
+    if (args.event === "installation" && args.setupAction === "deleted") {
+      await ctx.db.delete(connection._id);
+      return { accepted: true, duplicate: false };
+    }
+
+    if (args.event === "push") {
+      await ctx.db.insert("githubSyncJobs", {
+        userId: connection.userId,
+        installationId: args.installationId,
+        repoFullName: args.repoFullName,
+        reason: "push",
+        deliveryId: args.deliveryId,
+        status: "pending",
+        attempt: 0,
+        runAfter: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { accepted: true, duplicate: false };
+    }
+
+    if (args.event === "installation_repositories") {
+      await ctx.db.insert("githubSyncJobs", {
+        userId: connection.userId,
+        installationId: args.installationId,
+        reason: "installation_repositories",
+        deliveryId: args.deliveryId,
+        status: "pending",
+        attempt: 0,
+        runAfter: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return { accepted: true, duplicate: false };
+    }
+
+    if (args.event === "installation") {
+      await ctx.db.insert("githubSyncJobs", {
+        userId: connection.userId,
+        installationId: args.installationId,
+        reason: "reconcile",
+        deliveryId: args.deliveryId,
+        status: "pending",
+        attempt: 0,
+        runAfter: now,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return { accepted: true, duplicate: false };
   },
 });
 
-const upsertConnection = internalMutation({
-  args: { userId: v.string(), token: v.string(), login: v.string() },
+export const triggerSyncWorker = action({
+  args: { secret: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const expected = process.env.GITHUB_APP_WEBHOOK_SECRET;
+    if (!expected || args.secret !== expected) {
+      throw new ConvexError({
+        code: "UNAUTHORIZED",
+        message: "Worker trigger secret mismatch",
+      });
+    }
+    await ctx.runAction((internal as any).githubNode.runSyncWorker, {});
+    return null;
+  },
+});
+
+const upsertAppConnection = internalMutation({
+  args: {
+    userId: v.string(),
+    installationId: v.number(),
+    installationAccountLogin: v.string(),
+    installationAccountType: v.union(v.literal("User"), v.literal("Organization")),
+    repoSelectionMode: v.union(v.literal("selected"), v.literal("all")),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("githubConnections")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .first();
+
     const payload = {
       userId: args.userId,
-      accessToken: args.token,
-      githubLogin: args.login,
+      authMode: "github_app" as const,
+      installationId: args.installationId,
+      installationAccountLogin: args.installationAccountLogin,
+      installationAccountType: args.installationAccountType,
+      repoSelectionMode: args.repoSelectionMode,
+      syncStatus: "idle" as const,
       connectedAt: Date.now(),
+      lastErrorCode: undefined,
+      lastErrorMessage: undefined,
     };
+
     if (existing) {
-      await ctx.db.patch(existing._id, { ...payload, lastSyncedAt: existing.lastSyncedAt });
+      await ctx.db.patch(existing._id, payload);
     } else {
       await ctx.db.insert("githubConnections", payload);
     }
+
     return null;
   },
 });
 
-const listConnections = internalQuery({
-  args: {},
-  returns: v.array(
-    v.object({
-      userId: v.string(),
-      token: v.string(),
-      login: v.string(),
-      lastSyncedAt: v.union(v.number(), v.null()),
-      historySyncedAt: v.union(v.number(), v.null()),
-      streakDays: v.union(v.number(), v.null()),
-      streakUpdatedAt: v.union(v.number(), v.null()),
-    }),
-  ),
-  handler: async (ctx) => {
-    const connections = await ctx.db.query("githubConnections").collect();
-    return connections.map((connection) => ({
-      userId: connection.userId,
-      token: connection.accessToken,
-      login: connection.githubLogin ?? "unknown",
-      lastSyncedAt: connection.lastSyncedAt ?? null,
-      historySyncedAt: connection.historySyncedAt ?? null,
-      streakDays: connection.streakDays ?? null,
-      streakUpdatedAt: connection.streakUpdatedAt ?? null,
-    }));
+const setSyncStatus = internalMutation({
+  args: {
+    userId: v.string(),
+    status: v.union(v.literal("idle"), v.literal("syncing"), v.literal("error")),
+    errorCode: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!existing) return null;
+
+    await ctx.db.patch(existing._id, {
+      syncStatus: args.status,
+      lastErrorCode: args.errorCode,
+      lastErrorMessage: args.errorMessage,
+    });
+
+    return null;
   },
 });
 
-const getConnectionInternal = internalQuery({
-  args: { userId: v.string() },
+const getConnectionByInstallation = internalQuery({
+  args: { installationId: v.number() },
   returns: v.union(
     v.object({
-      connected: v.boolean(),
-      login: v.string(),
-      token: v.string(),
+      userId: v.string(),
+      installationId: v.number(),
+      githubLogin: v.union(v.string(), v.null()),
       lastSyncedAt: v.union(v.number(), v.null()),
       historySyncedAt: v.union(v.number(), v.null()),
+      syncedFromAt: v.union(v.number(), v.null()),
+      syncedToAt: v.union(v.number(), v.null()),
       streakDays: v.union(v.number(), v.null()),
       streakUpdatedAt: v.union(v.number(), v.null()),
     }),
@@ -434,17 +369,18 @@ const getConnectionInternal = internalQuery({
   handler: async (ctx, args) => {
     const connection = await ctx.db
       .query("githubConnections")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .withIndex("by_installation", (q) => q.eq("installationId", args.installationId))
       .first();
-    if (!connection) {
-      return null;
-    }
+    if (!connection) return null;
+
     return {
-      login: connection.githubLogin ?? "unknown",
-      connected: true,
-      token: connection.accessToken,
+      userId: connection.userId,
+      installationId: args.installationId,
+      githubLogin: connection.githubLogin ?? null,
       lastSyncedAt: connection.lastSyncedAt ?? null,
       historySyncedAt: connection.historySyncedAt ?? null,
+      syncedFromAt: connection.syncedFromAt ?? null,
+      syncedToAt: connection.syncedToAt ?? null,
       streakDays: connection.streakDays ?? null,
       streakUpdatedAt: connection.streakUpdatedAt ?? null,
     };
@@ -456,6 +392,8 @@ const markSynced = internalMutation({
     userId: v.string(),
     timestamp: v.number(),
     historySyncedAt: v.optional(v.number()),
+    syncedFromAt: v.optional(v.number()),
+    syncedToAt: v.optional(v.number()),
     streakDays: v.optional(v.number()),
     streakUpdatedAt: v.optional(v.number()),
   },
@@ -469,13 +407,27 @@ const markSynced = internalMutation({
       const patch: {
         lastSyncedAt: number;
         historySyncedAt?: number;
+        syncedFromAt?: number;
+        syncedToAt?: number;
         streakDays?: number;
         streakUpdatedAt?: number;
+        syncStatus: "idle";
+        lastErrorCode?: string;
+        lastErrorMessage?: string;
       } = {
         lastSyncedAt: args.timestamp,
+        syncStatus: "idle",
+        lastErrorCode: undefined,
+        lastErrorMessage: undefined,
       };
       if (args.historySyncedAt !== undefined) {
         patch.historySyncedAt = args.historySyncedAt;
+      }
+      if (args.syncedFromAt !== undefined) {
+        patch.syncedFromAt = args.syncedFromAt;
+      }
+      if (args.syncedToAt !== undefined) {
+        patch.syncedToAt = args.syncedToAt;
       }
       if (args.streakDays !== undefined) {
         patch.streakDays = args.streakDays;
@@ -553,109 +505,156 @@ const saveCommit = internalMutation({
   },
 });
 
-async function syncUser(
-  ctx: { runMutation: any; runQuery: any },
-  connection: {
-    userId: string;
-    token: string;
-    login: string;
-    lastSyncedAt?: number | null;
-    historySyncedAt?: number | null;
-    streakUpdatedAt?: number | null;
+const enqueueSyncJob = internalMutation({
+  args: {
+    userId: v.string(),
+    installationId: v.number(),
+    repoFullName: v.optional(v.string()),
+    reason: v.union(
+      v.literal("initial_backfill"),
+      v.literal("push"),
+      v.literal("installation_repositories"),
+      v.literal("reconcile"),
+    ),
+    deliveryId: v.optional(v.string()),
+    status: v.union(v.literal("pending"), v.literal("processing"), v.literal("completed"), v.literal("failed")),
+    attempt: v.number(),
+    runAfter: v.number(),
+    errorMessage: v.optional(v.string()),
   },
-  options: { forceStreakRefresh?: boolean } = {},
-) {
-  const now = Date.now();
-  const shouldBackfill = !connection.historySyncedAt;
-  const shouldRefreshStreak =
-    options.forceStreakRefresh ||
-    !connection.streakUpdatedAt ||
-    now - connection.streakUpdatedAt > STREAK_REFRESH_WINDOW_MS;
-  const sinceTimestamp =
-    connection.lastSyncedAt && !shouldBackfill
-      ? connection.lastSyncedAt - SYNC_SAFETY_WINDOW_MS
-      : now - HISTORY_BACKFILL_WINDOW_MS;
-  const since = new Date(sinceTimestamp).toISOString();
-
-  const repoPageLimit = shouldBackfill ? HISTORY_REPO_PAGE_LIMIT : DEFAULT_REPO_PAGE_LIMIT;
-  const repoLimit = shouldBackfill ? HISTORY_REPO_LIMIT : DEFAULT_REPO_LIMIT;
-  const commitPageLimit = shouldBackfill ? HISTORY_COMMIT_PAGE_LIMIT : DEFAULT_COMMIT_PAGE_LIMIT;
-
-  const repos = await fetchPaged<{
-    name: string;
-    full_name: string;
-    owner: { login: string };
-    archived: boolean;
-    disabled: boolean;
-    id: number;
-  }>(connection.token, `${GITHUB_API}/user/repos?sort=updated`, repoPageLimit);
-
-  let commitsSaved = 0;
-  let reposProcessed = 0;
-
-  for (const repo of repos.slice(0, repoLimit)) {
-    if (repo.archived || repo.disabled) continue;
-    reposProcessed += 1;
-    let commits: { sha: string }[] = [];
-    try {
-      commits = await fetchPaged<{ sha: string }>(
-        connection.token,
-        `${GITHUB_API}/repos/${repo.full_name}/commits?author=${connection.login}&since=${since}`,
-        commitPageLimit,
-      );
-    } catch (error) {
-      if (isEmptyRepoError(error)) {
-        continue;
-      }
-      throw error;
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    if (args.deliveryId) {
+      const duplicate = await ctx.db
+        .query("githubSyncJobs")
+        .withIndex("by_delivery", (q) => q.eq("deliveryId", args.deliveryId))
+        .first();
+      if (duplicate) return null;
     }
 
-    for (const commit of commits) {
-      const detail = await githubRequest<{
-        sha: string;
-        html_url: string;
-        commit: { message: string; committer: { date: string } };
-        stats: { additions: number; deletions: number; total: number };
-        files: { filename: string }[];
-      }>(connection.token, `${GITHUB_API}/repos/${repo.full_name}/commits/${commit.sha}`);
+    await ctx.db.insert("githubSyncJobs", {
+      userId: args.userId,
+      installationId: args.installationId,
+      repoFullName: args.repoFullName,
+      reason: args.reason,
+      deliveryId: args.deliveryId,
+      status: args.status,
+      attempt: args.attempt,
+      runAfter: args.runAfter,
+      errorMessage: args.errorMessage,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-      const commitResult = await ctx.runMutation(internal.github.saveCommit, {
-        userId: connection.userId,
-        repo: repo.full_name,
-        repoId: repo.id,
-        sha: detail.sha,
-        message: detail.commit.message ?? "",
-        url: detail.html_url,
-        additions: detail.stats?.additions ?? 0,
-        deletions: detail.stats?.deletions ?? 0,
-        filesChanged: detail.files?.length ?? 0,
-        committedAt: new Date(detail.commit.committer.date).getTime(),
+    return null;
+  },
+});
+
+const claimSyncJobs = internalMutation({
+  args: { limit: v.number(), now: v.number() },
+  returns: v.array(
+    v.object({
+      id: v.id("githubSyncJobs"),
+      userId: v.string(),
+      installationId: v.number(),
+      repoFullName: v.union(v.string(), v.null()),
+      reason: v.union(
+        v.literal("initial_backfill"),
+        v.literal("push"),
+        v.literal("installation_repositories"),
+        v.literal("reconcile"),
+      ),
+      attempt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const pending = await ctx.db
+      .query("githubSyncJobs")
+      .withIndex("by_status_runAfter", (q) => q.eq("status", "pending").lte("runAfter", args.now))
+      .take(Math.max(1, Math.min(args.limit, 20)));
+
+    const claimed = [] as {
+      id: any;
+      userId: string;
+      installationId: number;
+      repoFullName: string | null;
+      reason: "initial_backfill" | "push" | "installation_repositories" | "reconcile";
+      attempt: number;
+    }[];
+
+    for (const job of pending) {
+      await ctx.db.patch(job._id, {
+        status: "processing",
+        updatedAt: Date.now(),
       });
-
-      if (commitResult.inserted) {
-        commitsSaved += 1;
-      }
+      claimed.push({
+        id: job._id,
+        userId: job.userId,
+        installationId: job.installationId,
+        repoFullName: job.repoFullName ?? null,
+        reason: job.reason,
+        attempt: job.attempt,
+      });
     }
-  }
 
-  let streakDays: number | null = null;
-  if (shouldRefreshStreak) {
-    try {
-      streakDays = await computeContributionStreak(connection.token);
-    } catch (error) {
-      console.warn("Failed to refresh GitHub streak", error);
+    return claimed;
+  },
+});
+
+const completeSyncJob = internalMutation({
+  args: { jobId: v.id("githubSyncJobs") },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.jobId, {
+      status: "completed",
+      updatedAt: Date.now(),
+      errorMessage: undefined,
+    });
+    return null;
+  },
+});
+
+const failSyncJob = internalMutation({
+  args: {
+    jobId: v.id("githubSyncJobs"),
+    attempt: v.number(),
+    errorMessage: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    if (args.attempt >= MAX_JOB_ATTEMPTS) {
+      await ctx.db.patch(args.jobId, {
+        status: "failed",
+        attempt: args.attempt,
+        errorMessage: args.errorMessage,
+        updatedAt: now,
+      });
+      return null;
     }
-  }
 
-  await ctx.runMutation(internal.github.markSynced, {
-    userId: connection.userId,
-    timestamp: now,
-    historySyncedAt: shouldBackfill ? now : undefined,
-    streakDays: streakDays ?? undefined,
-    streakUpdatedAt: streakDays !== null ? now : undefined,
-  });
+    const backoffMs = Math.min(5 * 60 * 1000, 2 ** args.attempt * 5000);
+    await ctx.db.patch(args.jobId, {
+      status: "pending",
+      attempt: args.attempt,
+      errorMessage: args.errorMessage,
+      runAfter: now + backoffMs,
+      updatedAt: now,
+    });
 
-  return { commits: commitsSaved, repos: reposProcessed };
-}
+    return null;
+  },
+});
 
-export { getConnectionInternal, listConnections, markSynced, saveCommit, upsertConnection };
+export {
+  claimSyncJobs,
+  completeSyncJob,
+  enqueueSyncJob,
+  failSyncJob,
+  getConnectionByInstallation,
+  markSynced,
+  saveCommit,
+  setSyncStatus,
+  upsertAppConnection,
+};
