@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { query } from "./_generated/server";
+import { query, type QueryCtx } from "./_generated/server";
 import { getUserId } from "./auth";
 import { formatLastSync, toDateKey } from "./lib";
 
@@ -126,7 +126,7 @@ export const getOverview = query({
   },
 });
 
-async function computeStreakDays(ctx: { db: any }, userId: string) {
+async function computeStreakDays(ctx: QueryCtx, userId: string) {
   const batchSize = 60;
   const dayMs = 24 * 60 * 60 * 1000;
   const toDayStamp = (dateKey: string) => new Date(`${dateKey}T00:00:00Z`).getTime();

@@ -44,6 +44,16 @@ pnpm run convex:codegen
 
 Then open the Convex dashboard to set env vars and deploy the cron jobs.
 
+## Production deploy (Vercel)
+
+- Set `CONVEX_DEPLOY_KEY` in Vercel project env vars.
+- Build command is configured in `vercel.json` as `pnpm run build:prod`.
+- `build:prod` does:
+  1. `convex codegen`
+  2. `convex deploy --cmd "pnpm turbo run build --filter=web"`
+
+This ensures Convex backend changes are pushed before the Next.js production build runs.
+
 ## GitHub
 
 Generate a Fine-grained PAT with `repo` + `read:user` scopes. Paste it in the UI to sync commits.

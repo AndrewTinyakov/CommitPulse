@@ -95,19 +95,20 @@ export default function Dashboard() {
 
 function RemoteDashboard() {
   const { isSignedIn, isLoaded } = useAuth();
-  const overview = useQuery(api.dashboard.getOverview, isSignedIn ? {} : "skip");
-  const goals = useQuery(api.dashboard.getGoals, isSignedIn ? {} : "skip");
+  const signedIn = Boolean(isSignedIn);
+  const overview = useQuery(api.dashboard.getOverview, signedIn ? {} : "skip");
+  const goals = useQuery(api.dashboard.getGoals, signedIn ? {} : "skip");
   const activity = useQuery(
     api.dashboard.getActivity,
-    isSignedIn ? { limit: 6 } : "skip",
+    signedIn ? { limit: 6 } : "skip",
   );
-  const github = useQuery(api.github.getConnection, isSignedIn ? {} : "skip");
-  const telegram = useQuery(api.telegram.getConnection, isSignedIn ? {} : "skip");
+  const github = useQuery(api.github.getConnection, signedIn ? {} : "skip");
+  const telegram = useQuery(api.telegram.getConnection, signedIn ? {} : "skip");
 
   return (
     <DashboardShell
       authLoaded={isLoaded}
-      signedIn={isSignedIn}
+      signedIn={signedIn}
       overview={overview ?? fallbackOverview}
       goals={goals ?? fallbackGoals}
       activity={activity ?? []}

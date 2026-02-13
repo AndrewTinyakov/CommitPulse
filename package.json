@@ -5,8 +5,10 @@
   "scripts": {
     "convex:codegen": "node scripts/convex-local.mjs codegen",
     "convex:dev": "node scripts/convex-local.mjs dev",
+    "convex:deploy": "pnpm exec convex deploy",
     "dev": "turbo run dev --parallel",
     "build": "turbo run build",
+    "build:prod": "node scripts/prod-build.mjs",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck"
   },

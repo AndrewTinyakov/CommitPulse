@@ -324,7 +324,7 @@ export const getConnection = query({
   },
 });
 
-export const syncNow = action({
+export const syncNow: ReturnType<typeof action> = action({
   args: {},
   returns: v.object({ commits: v.number(), repos: v.number() }),
   handler: async (ctx) => {
