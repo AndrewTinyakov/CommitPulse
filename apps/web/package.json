@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3002",
     "build": "next build",
+    "build:prod": "pnpm -w run build:prod",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit"
