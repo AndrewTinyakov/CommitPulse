@@ -38,6 +38,11 @@ export const completeGithubAppSetup = action({
       status: "pending",
       attempt: 0,
     });
+    await ctx.runMutation(internal.github.setSyncStatus, {
+      userId,
+      status: "syncing",
+    });
+    await ctx.runAction((internal as any).githubNode.runSyncWorker, {});
 
     return { connected: true };
   },
@@ -115,6 +120,7 @@ export const getConnectionV2 = query({
       lastWebhookAt: v.union(v.number(), v.null()),
       lastErrorCode: v.union(v.string(), v.null()),
       lastErrorMessage: v.union(v.string(), v.null()),
+      hasPendingSync: v.boolean(),
     }),
     v.null(),
   ),
@@ -144,8 +150,31 @@ export const getConnectionV2 = query({
         lastWebhookAt: null,
         lastErrorCode: null,
         lastErrorMessage: null,
+        hasPendingSync: false,
       };
     }
+
+    const hasPending = connection.installationId
+      ? (
+          await ctx.db
+            .query("githubSyncJobs")
+            .withIndex("by_installation_status", (q) =>
+              q.eq("installationId", connection.installationId!).eq("status", "pending"),
+            )
+            .take(1)
+        ).length > 0
+      : false;
+    const hasProcessing = connection.installationId
+      ? (
+          await ctx.db
+            .query("githubSyncJobs")
+            .withIndex("by_installation_status", (q) =>
+              q.eq("installationId", connection.installationId!).eq("status", "processing"),
+            )
+            .take(1)
+        ).length > 0
+      : false;
+    const hasPendingSync = hasPending || hasProcessing;
 
     return {
       connected: true,
@@ -163,6 +192,7 @@ export const getConnectionV2 = query({
       lastWebhookAt: connection.lastWebhookAt ?? null,
       lastErrorCode: connection.lastErrorCode ?? null,
       lastErrorMessage: connection.lastErrorMessage ?? null,
+      hasPendingSync,
     };
   },
 });
@@ -235,6 +265,7 @@ export const ingestWebhookEvent = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await ctx.db.patch(connection._id, { syncStatus: "syncing" });
       return { accepted: true, duplicate: false };
     }
 
@@ -250,6 +281,7 @@ export const ingestWebhookEvent = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await ctx.db.patch(connection._id, { syncStatus: "syncing" });
       return { accepted: true, duplicate: false };
     }
 
@@ -265,6 +297,7 @@ export const ingestWebhookEvent = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await ctx.db.patch(connection._id, { syncStatus: "syncing" });
     }
 
     return { accepted: true, duplicate: false };

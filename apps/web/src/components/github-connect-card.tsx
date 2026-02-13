@@ -97,6 +97,7 @@ export default function GitHubConnectCard() {
     if (syncStatus === "error") return "Sync error";
     return "Idle";
   }, [connection?.syncStatus]);
+  const isFetching = connection?.syncStatus === "syncing";
 
   return (
     <div className="panel flex h-full flex-col rounded-3xl px-6 py-6" id="github-connect">
@@ -189,6 +190,11 @@ export default function GitHubConnectCard() {
               )}
             </span>
           </div>
+          {isFetching && (
+            <div className="rounded-lg border border-[rgba(81,214,255,0.35)] bg-[rgba(81,214,255,0.1)] px-3 py-2 text-[11px] text-[var(--text)]">
+              We are currently fetching commit history and syncing your latest changes.
+            </div>
+          )}
           <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
             <span>Last sync</span>
             <span className="text-[var(--text)] tabular-nums">{connection?.lastSync ?? "-"}</span>
