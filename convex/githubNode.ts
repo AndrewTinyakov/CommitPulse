@@ -1,6 +1,6 @@
 "use node";
 
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import { createSign } from "crypto";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -248,7 +248,7 @@ async function runBatches<T>(items: T[], batchSize: number, fn: (item: T) => Pro
 
 export const runSyncWorker = internalAction({
   args: {},
-  returns: null,
+  returns: v.null(),
   handler: async (ctx) => {
     const claimed = (await ctx.runMutation(internal.github.claimSyncJobs, {
       limit: WORKER_BATCH_SIZE,
