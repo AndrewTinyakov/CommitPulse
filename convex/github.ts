@@ -502,11 +502,7 @@ const computeCurrentStreakSnapshot = internalQuery({
   }),
   handler: async (ctx, args) => {
     const anchorTimestamp = args.anchorTimestamp ?? Date.now();
-    const goals = await ctx.db
-      .query("goals")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .first();
-    const timezone = goals?.timezone ?? "UTC";
+    const timezone = "UTC";
 
     const committedAt: number[] = [];
     let cursor: string | null = null;

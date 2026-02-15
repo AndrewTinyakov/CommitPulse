@@ -14,7 +14,7 @@ import {
 const GITHUB_API = "https://api.github.com";
 const SYNC_SAFETY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REPO_LIMIT = 120;
-const DEFAULT_COMMIT_PAGE_LIMIT = 3;
+const DEFAULT_COMMIT_PAGE_LIMIT = 8;
 const WORKER_BATCH_SIZE = 8;
 const WORKER_CONCURRENCY = 3;
 
@@ -33,6 +33,8 @@ type InstallationRepo = {
   full_name: string;
   archived: boolean;
   disabled: boolean;
+  fork: boolean;
+  default_branch?: string | null;
 };
 
 function getRequiredEnv(name: string) {
@@ -141,18 +143,38 @@ async function fetchCommits(
   repoFullName: string,
   sinceIso: string,
   commitPageLimit: number,
+  branch: string,
   authorLogin?: string | null,
 ) {
   const commits: { sha: string }[] = [];
   for (let page = 1; page <= commitPageLimit; page += 1) {
     const authorPart = authorLogin ? `&author=${encodeURIComponent(authorLogin)}` : "";
-    const url = `${GITHUB_API}/repos/${repoFullName}/commits?since=${encodeURIComponent(sinceIso)}${authorPart}&per_page=100&page=${page}`;
-    const batch = await githubRequest<{ sha: string }[]>(token, url);
+    const branchPart = `&sha=${encodeURIComponent(branch)}`;
+    const url = `${GITHUB_API}/repos/${repoFullName}/commits?since=${encodeURIComponent(sinceIso)}${branchPart}${authorPart}&per_page=100&page=${page}`;
+    let batch: { sha: string }[];
+    try {
+      batch = await githubRequest<{ sha: string }[]>(token, url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("(404)") || message.includes("(409)") || message.includes("(422)")) {
+        return commits;
+      }
+      throw error;
+    }
     if (!batch.length) break;
     commits.push(...batch);
     if (batch.length < 100) break;
   }
   return commits;
+}
+
+function getContributionBranches(defaultBranch?: string | null) {
+  const branches = new Set<string>();
+  if (defaultBranch && defaultBranch.trim().length > 0) {
+    branches.add(defaultBranch.trim());
+  }
+  branches.add("gh-pages");
+  return Array.from(branches);
 }
 
 async function processJob(ctx: any, job: SyncJob) {
@@ -194,25 +216,42 @@ async function processJob(ctx: any, job: SyncJob) {
   let latest: number | null = connection.syncedToAt ?? null;
 
   for (const repo of repos) {
-    if (repo.archived || repo.disabled) continue;
-    const commits = await fetchCommits(
-      installationToken,
-      repo.full_name,
-      sinceIso,
-      DEFAULT_COMMIT_PAGE_LIMIT,
-      connection.githubLogin,
-    );
+    if (repo.archived || repo.disabled || repo.fork) continue;
+    const branchCandidates = getContributionBranches(repo.default_branch);
+    const commitShas = new Set<string>();
+    for (const branch of branchCandidates) {
+      const commits = await fetchCommits(
+        installationToken,
+        repo.full_name,
+        sinceIso,
+        DEFAULT_COMMIT_PAGE_LIMIT,
+        branch,
+        connection.githubLogin,
+      );
+      for (const commit of commits) {
+        commitShas.add(commit.sha);
+      }
+    }
 
-    for (const commit of commits) {
+    for (const sha of commitShas) {
       const detail = await githubRequest<{
         sha: string;
         html_url: string;
-        commit: { message: string; committer: { date: string } };
+        commit: {
+          message: string;
+          author?: { date?: string | null } | null;
+          committer?: { date?: string | null } | null;
+        };
         stats: { additions: number; deletions: number; total: number };
         files: { filename: string }[];
-      }>(installationToken, `${GITHUB_API}/repos/${repo.full_name}/commits/${commit.sha}`);
+      }>(installationToken, `${GITHUB_API}/repos/${repo.full_name}/commits/${sha}`);
 
-      const committedAt = new Date(detail.commit.committer.date).getTime();
+      // GitHub profile contributions are keyed to the commit author timestamp.
+      const authoredDate = detail.commit.author?.date ?? detail.commit.committer?.date;
+      const committedAt = authoredDate ? new Date(authoredDate).getTime() : Number.NaN;
+      if (!Number.isFinite(committedAt)) {
+        continue;
+      }
       earliest = earliest === null ? committedAt : Math.min(earliest, committedAt);
       latest = latest === null ? committedAt : Math.max(latest, committedAt);
 
