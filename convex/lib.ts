@@ -38,7 +38,7 @@ function dayStampFromDateKey(dateKey: string) {
   return null;
 }
 
-export function computeStreakFromDateKeys(dateKeys: string[]) {
+export function computeStreakFromDateKeys(dateKeys: string[], anchorDateKey?: string) {
   const dayMs = 24 * 60 * 60 * 1000;
   const uniqueStamps = Array.from(
     new Set(
@@ -49,6 +49,25 @@ export function computeStreakFromDateKeys(dateKeys: string[]) {
   ).sort((a, b) => b - a);
 
   if (uniqueStamps.length === 0) return 0;
+
+  if (anchorDateKey) {
+    const anchorStamp = dayStampFromDateKey(anchorDateKey);
+    if (anchorStamp !== null) {
+      const stamps = new Set(uniqueStamps);
+      const startStamp = stamps.has(anchorStamp)
+        ? anchorStamp
+        : stamps.has(anchorStamp - dayMs)
+          ? anchorStamp - dayMs
+          : null;
+      if (startStamp === null) return 0;
+
+      let streak = 0;
+      for (let cursor = startStamp; stamps.has(cursor); cursor -= dayMs) {
+        streak += 1;
+      }
+      return streak;
+    }
+  }
 
   let streak = 1;
   for (let index = 1; index < uniqueStamps.length; index += 1) {

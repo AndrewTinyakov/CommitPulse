@@ -26,10 +26,12 @@ export async function POST(request: Request) {
     installation?: { id?: number };
     repository?: { full_name?: string };
     action?: string;
+    sender?: { login?: string };
   };
 
   const installationId = payload.installation?.id;
   const repoFullName = payload.repository?.full_name;
+  const senderLogin = payload.sender?.login;
 
   try {
     const convex = convexClient();
@@ -40,6 +42,7 @@ export async function POST(request: Request) {
       installationId: typeof installationId === "number" ? installationId : undefined,
       repoFullName,
       setupAction: payload.action,
+      senderLogin,
     });
     await convex.action(api.github.triggerSyncWorker, {
       secret: webhookForwardSecret(),

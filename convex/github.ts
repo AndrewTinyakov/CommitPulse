@@ -14,6 +14,11 @@ const MAX_JOB_ATTEMPTS = 6;
 
 async function computeStreakFromDailyStats(ctx: any, userId: string) {
   const batchSize = 60;
+  const goals = await ctx.db
+    .query("goals")
+    .withIndex("by_user", (q: any) => q.eq("userId", userId))
+    .first();
+  const timeZone = goals?.timezone ?? "UTC";
   let cursorDate: string | null = null;
   const dateKeys: string[] = [];
 
@@ -38,7 +43,7 @@ async function computeStreakFromDailyStats(ctx: any, userId: string) {
     cursorDate = batch[batch.length - 1].date;
   }
 
-  return computeStreakFromDateKeys(dateKeys);
+  return computeStreakFromDateKeys(dateKeys, toDateKey(Date.now(), timeZone));
 }
 
 export const completeGithubAppSetup = action({
@@ -275,6 +280,7 @@ export const ingestWebhookEvent = mutation({
     installationId: v.optional(v.number()),
     repoFullName: v.optional(v.string()),
     setupAction: v.optional(v.string()),
+    senderLogin: v.optional(v.string()),
   },
   returns: v.object({ accepted: v.boolean(), duplicate: v.boolean() }),
   handler: async (ctx, args) => {
@@ -315,7 +321,12 @@ export const ingestWebhookEvent = mutation({
       return { accepted: true, duplicate: false };
     }
 
-    await ctx.db.patch(connection._id, { lastWebhookAt: now });
+    const inferredGithubLogin =
+      connection.githubLogin ?? (args.event === "installation" ? args.senderLogin : undefined);
+    await ctx.db.patch(connection._id, {
+      lastWebhookAt: now,
+      githubLogin: inferredGithubLogin,
+    });
 
     if (args.event === "installation" && args.setupAction === "deleted") {
       const batchSize = 128;

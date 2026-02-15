@@ -112,7 +112,7 @@ export const getOverview = query({
       .query("githubConnections")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const streakDays = await computeStreakDays(ctx, userId);
+    const streakDays = await computeStreakDays(ctx, userId, timeZone);
 
     return {
       todayCommits: todayStats?.commitCount ?? 0,
@@ -126,7 +126,7 @@ export const getOverview = query({
   },
 });
 
-async function computeStreakDays(ctx: QueryCtx, userId: string) {
+async function computeStreakDays(ctx: QueryCtx, userId: string, timeZone: string) {
   const batchSize = 60;
   let cursorDate: string | null = null;
   const dateKeys: string[] = [];
@@ -156,7 +156,7 @@ async function computeStreakDays(ctx: QueryCtx, userId: string) {
     cursorDate = batch[batch.length - 1].date;
   }
 
-  return computeStreakFromDateKeys(dateKeys);
+  return computeStreakFromDateKeys(dateKeys, toDateKey(Date.now(), timeZone));
 }
 
 export const getStatsRange = query({
