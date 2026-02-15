@@ -22,7 +22,11 @@ async function computeStreakSnapshotFromCommitEvents(
   anchorTimestamp: number,
   lookbackDays?: number,
 ) {
-  const timezone = "UTC";
+  const goals = await ctx.db
+    .query("goals")
+    .withIndex("by_user", (q: any) => q.eq("userId", userId))
+    .first();
+  const timezone = goals?.timezone ?? "UTC";
 
   const committedAt: number[] = [];
   let cursor: string | null = null;
