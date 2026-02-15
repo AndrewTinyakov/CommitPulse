@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useAction } from "convex/react";
+import { useQuery, useAction, useMutation } from "convex/react";
 import { GitBranch, ShieldCheck, Timer, Wifi, AlertTriangle, Link as LinkIcon, Copy } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
@@ -20,7 +20,9 @@ export default function GitHubConnectCard() {
   const { isSignedIn } = useAuth();
   const searchParams = useSearchParams();
   const connection = useQuery(api.github.getConnectionV2, isSignedIn ? {} : "skip");
+  const goals = useQuery(api.dashboard.getGoals, isSignedIn ? {} : "skip");
   const streakDebug = useQuery(api.dashboard.getStreakDebug as any, isSignedIn ? {} : "skip") as any;
+  const saveGoals = useMutation(api.goals.setGoals);
   const completeGithubAppSetup = useAction(api.github.completeGithubAppSetup);
   const disconnect = useAction(api.github.disconnect);
   const recomputeFromScratch = useAction(api.github.recomputeFromScratch);
@@ -129,6 +131,28 @@ export default function GitHubConnectCard() {
     }
   };
 
+  const handleUseBrowserTimezone = async () => {
+    if (typeof Intl === "undefined") {
+      setStatus("Could not detect browser timezone.");
+      return;
+    }
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+    setWorking(true);
+    setStatus(null);
+    try {
+      await saveGoals({
+        commitsPerDay: goals?.commitsPerDay ?? 3,
+        locPerDay: goals?.locPerDay ?? 120,
+        pushByHour: goals?.pushByHour ?? 18,
+        timezone,
+      });
+      setStatus(`Timezone set to ${timezone}. Streak recomputed using this timezone.`);
+    } finally {
+      setWorking(false);
+    }
+  };
+
   const statusLabel = useMemo(() => {
     const syncStatus = connection?.syncStatus;
     if (!syncStatus) return "Idle";
@@ -194,6 +218,15 @@ export default function GitHubConnectCard() {
             className="rounded-full border border-[rgba(81,214,255,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)] disabled:opacity-50"
           >
             Recompute stats
+          </button>
+        )}
+        {isConnected && (
+          <button
+            onClick={handleUseBrowserTimezone}
+            disabled={working}
+            className="rounded-full border border-[rgba(183,255,72,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent)] disabled:opacity-50"
+          >
+            Use browser timezone
           </button>
         )}
         {isConnected && (
