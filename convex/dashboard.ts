@@ -1,7 +1,12 @@
 import { v } from "convex/values";
-import { query, type QueryCtx } from "./_generated/server";
+import { query } from "./_generated/server";
 import { getUserId } from "./auth";
-import { computeStreakFromDateKeys, formatLastSync, toDateKey } from "./lib";
+import {
+  computeCurrentStreakFromCommitEvents,
+  formatLastSync,
+  toDateKey,
+  touchesLookbackBoundary,
+} from "./lib";
 
 const goalsValidator = v.object({
   commitsPerDay: v.number(),
@@ -10,6 +15,54 @@ const goalsValidator = v.object({
   timezone: v.string(),
   updatedAt: v.number(),
 });
+
+async function computeStreakSnapshotFromCommitEvents(
+  ctx: any,
+  userId: string,
+  anchorTimestamp: number,
+  lookbackDays?: number,
+) {
+  const goals = await ctx.db
+    .query("goals")
+    .withIndex("by_user", (q: any) => q.eq("userId", userId))
+    .first();
+  const timezone = goals?.timezone ?? "UTC";
+
+  const committedAt: number[] = [];
+  let cursor: string | null = null;
+  const batchSize = 256;
+  const maxPages = 160;
+  for (let page = 0; page < maxPages; page += 1) {
+    const result: any = await ctx.db
+      .query("commitEvents")
+      .withIndex("by_user_date", (q: any) => q.eq("userId", userId))
+      .order("desc")
+      .paginate({ numItems: batchSize, cursor });
+    for (const commit of result.page) {
+      committedAt.push(commit.committedAt);
+    }
+    if (result.isDone) break;
+    cursor = result.continueCursor;
+    if (!cursor) break;
+  }
+
+  const snapshot = computeCurrentStreakFromCommitEvents(committedAt, timezone, anchorTimestamp);
+  const lookbackStartDateKey =
+    lookbackDays !== undefined
+      ? toDateKey(anchorTimestamp - lookbackDays * 24 * 60 * 60 * 1000, timezone)
+      : null;
+
+  return {
+    timezone,
+    ...snapshot,
+    lookbackStartDateKey,
+    touchesLookbackBoundary:
+      lookbackStartDateKey === null
+        ? false
+        : touchesLookbackBoundary(snapshot.streakStartDateKey, lookbackStartDateKey),
+    commitEventsScanned: committedAt.length,
+  };
+}
 
 export const getConnections = query({
   args: {},
@@ -112,7 +165,12 @@ export const getOverview = query({
       .query("githubConnections")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const streakDays = await computeStreakDays(ctx, userId, timeZone);
+    const streakSnapshot = await computeStreakSnapshotFromCommitEvents(
+      ctx,
+      userId,
+      Date.now(),
+    );
+    const streakDays = streakSnapshot.streakDays;
 
     return {
       todayCommits: todayStats?.commitCount ?? 0,
@@ -125,39 +183,6 @@ export const getOverview = query({
     };
   },
 });
-
-async function computeStreakDays(ctx: QueryCtx, userId: string, timeZone: string) {
-  const batchSize = 60;
-  let cursorDate: string | null = null;
-  const dateKeys: string[] = [];
-
-  while (true) {
-    const batch = await ctx.db
-      .query("dailyStats")
-      .withIndex("by_user_date", (q) =>
-        cursorDate ? q.eq("userId", userId).lt("date", cursorDate) : q.eq("userId", userId),
-      )
-      .order("desc")
-      .take(batchSize);
-
-    if (batch.length === 0) {
-      break;
-    }
-
-    for (const stat of batch) {
-      if (stat.commitCount > 0) {
-        dateKeys.push(stat.date);
-      }
-    }
-
-    if (batch.length < batchSize) {
-      break;
-    }
-    cursorDate = batch[batch.length - 1].date;
-  }
-
-  return computeStreakFromDateKeys(dateKeys, toDateKey(Date.now(), timeZone));
-}
 
 export const getStatsRange = query({
   args: { days: v.number() },
@@ -189,6 +214,86 @@ export const getStatsRange = query({
       reposTouched: stat.reposTouched,
       updatedAt: stat.updatedAt,
     }));
+  },
+});
+
+export const getStreakDebug = query({
+  args: {},
+  returns: v.union(
+    v.object({
+      timezone: v.string(),
+      anchorDateKey: v.string(),
+      streakDays: v.number(),
+      streakStartDateKey: v.union(v.string(), v.null()),
+      firstGapDateKey: v.union(v.string(), v.null()),
+      newestDateKey: v.union(v.string(), v.null()),
+      oldestDateKey: v.union(v.string(), v.null()),
+      lookbackStartDateKey: v.union(v.string(), v.null()),
+      touchesLookbackBoundary: v.boolean(),
+      currentBackfillLookbackDays: v.union(v.number(), v.null()),
+      pendingBackfillLookbackDays: v.array(v.number()),
+      processingBackfillLookbackDays: v.array(v.number()),
+      hasPendingSync: v.boolean(),
+      commitEventsScanned: v.number(),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx) => {
+    const userId = await getUserId(ctx);
+    if (!userId) return null;
+
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+    if (!connection?.installationId) return null;
+
+    const pendingJobs = await ctx.db
+      .query("githubSyncJobs")
+      .withIndex("by_installation_status", (q) =>
+        q.eq("installationId", connection.installationId!).eq("status", "pending"),
+      )
+      .take(100);
+    const processingJobs = await ctx.db
+      .query("githubSyncJobs")
+      .withIndex("by_installation_status", (q) =>
+        q.eq("installationId", connection.installationId!).eq("status", "processing"),
+      )
+      .take(100);
+    const pendingBackfillLookbackDays = pendingJobs
+      .filter((job) => job.reason === "initial_backfill")
+      .map((job) => job.lookbackDays)
+      .filter((value): value is number => typeof value === "number");
+    const processingBackfillLookbackDays = processingJobs
+      .filter((job) => job.reason === "initial_backfill")
+      .map((job) => job.lookbackDays)
+      .filter((value): value is number => typeof value === "number");
+    const currentBackfillLookbackDays = [...pendingBackfillLookbackDays, ...processingBackfillLookbackDays]
+      .sort((a, b) => b - a)[0] ?? null;
+
+    const snapshot = await computeStreakSnapshotFromCommitEvents(
+      ctx,
+      userId,
+      Date.now(),
+      currentBackfillLookbackDays ?? undefined,
+    );
+
+    return {
+      timezone: snapshot.timezone,
+      anchorDateKey: snapshot.anchorDateKey,
+      streakDays: snapshot.streakDays,
+      streakStartDateKey: snapshot.streakStartDateKey,
+      firstGapDateKey: snapshot.firstGapDateKey,
+      newestDateKey: snapshot.newestDateKey,
+      oldestDateKey: snapshot.oldestDateKey,
+      lookbackStartDateKey: snapshot.lookbackStartDateKey,
+      touchesLookbackBoundary: snapshot.touchesLookbackBoundary,
+      currentBackfillLookbackDays,
+      pendingBackfillLookbackDays,
+      processingBackfillLookbackDays,
+      hasPendingSync: pendingJobs.length > 0 || processingJobs.length > 0,
+      commitEventsScanned: snapshot.commitEventsScanned,
+    };
   },
 });
 

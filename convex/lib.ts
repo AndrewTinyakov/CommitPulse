@@ -16,7 +16,12 @@ export function toDateKey(timestamp: number, timeZone = "UTC") {
   return `${year}-${month}-${day}`;
 }
 
-function dayStampFromDateKey(dateKey: string) {
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const INITIAL_BACKFILL_DAYS = 90;
+export const BACKFILL_STEP_DAYS = 90;
+export const MAX_BACKFILL_DAYS = 1825;
+
+export function dateKeyToDayStamp(dateKey: string) {
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateKey);
   if (iso) {
     const [, year, month, day] = iso;
@@ -38,45 +43,105 @@ function dayStampFromDateKey(dateKey: string) {
   return null;
 }
 
-export function computeStreakFromDateKeys(dateKeys: string[], anchorDateKey?: string) {
-  const dayMs = 24 * 60 * 60 * 1000;
+function dayStampToDateKey(dayStamp: number) {
+  return new Date(dayStamp).toISOString().slice(0, 10);
+}
+
+export type CurrentStreakComputation = {
+  anchorDateKey: string;
+  streakDays: number;
+  streakStartDateKey: string | null;
+  firstGapDateKey: string | null;
+  newestDateKey: string | null;
+  oldestDateKey: string | null;
+};
+
+export function computeCurrentStreakFromDateKeys(
+  dateKeys: string[],
+  anchorDateKey: string,
+): CurrentStreakComputation {
   const uniqueStamps = Array.from(
     new Set(
       dateKeys
-        .map((dateKey) => dayStampFromDateKey(dateKey))
+        .map((dateKey) => dateKeyToDayStamp(dateKey))
         .filter((stamp): stamp is number => stamp !== null),
     ),
   ).sort((a, b) => b - a);
 
-  if (uniqueStamps.length === 0) return 0;
-
-  if (anchorDateKey) {
-    const anchorStamp = dayStampFromDateKey(anchorDateKey);
-    if (anchorStamp !== null) {
-      const stamps = new Set(uniqueStamps);
-      const startStamp = stamps.has(anchorStamp)
-        ? anchorStamp
-        : stamps.has(anchorStamp - dayMs)
-          ? anchorStamp - dayMs
-          : null;
-      if (startStamp === null) return 0;
-
-      let streak = 0;
-      for (let cursor = startStamp; stamps.has(cursor); cursor -= dayMs) {
-        streak += 1;
-      }
-      return streak;
-    }
+  const anchorStamp = dateKeyToDayStamp(anchorDateKey);
+  const newestDateKey = uniqueStamps.length > 0 ? dayStampToDateKey(uniqueStamps[0]) : null;
+  const oldestDateKey =
+    uniqueStamps.length > 0 ? dayStampToDateKey(uniqueStamps[uniqueStamps.length - 1]) : null;
+  if (uniqueStamps.length === 0 || anchorStamp === null) {
+    return {
+      anchorDateKey,
+      streakDays: 0,
+      streakStartDateKey: null,
+      firstGapDateKey: anchorDateKey,
+      newestDateKey,
+      oldestDateKey,
+    };
   }
 
-  let streak = 1;
-  for (let index = 1; index < uniqueStamps.length; index += 1) {
-    const diffDays = Math.round((uniqueStamps[index - 1] - uniqueStamps[index]) / dayMs);
-    if (diffDays !== 1) break;
-    streak += 1;
+  const stamps = new Set(uniqueStamps);
+  const startStamp = stamps.has(anchorStamp)
+    ? anchorStamp
+    : stamps.has(anchorStamp - DAY_MS)
+      ? anchorStamp - DAY_MS
+      : null;
+  if (startStamp === null) {
+    return {
+      anchorDateKey,
+      streakDays: 0,
+      streakStartDateKey: null,
+      firstGapDateKey: anchorDateKey,
+      newestDateKey,
+      oldestDateKey,
+    };
   }
 
-  return streak;
+  let streakDays = 0;
+  let cursorStamp = startStamp;
+  while (stamps.has(cursorStamp)) {
+    streakDays += 1;
+    cursorStamp -= DAY_MS;
+  }
+
+  const streakStartStamp = startStamp - (streakDays - 1) * DAY_MS;
+  return {
+    anchorDateKey,
+    streakDays,
+    streakStartDateKey: dayStampToDateKey(streakStartStamp),
+    firstGapDateKey: dayStampToDateKey(cursorStamp),
+    newestDateKey,
+    oldestDateKey,
+  };
+}
+
+export function computeCurrentStreakFromCommitEvents(
+  committedAt: number[],
+  timeZone: string,
+  anchorTimestamp = Date.now(),
+): CurrentStreakComputation {
+  const dateKeys = committedAt.map((timestamp) => toDateKey(timestamp, timeZone));
+  const anchorDateKey = toDateKey(anchorTimestamp, timeZone);
+  return computeCurrentStreakFromDateKeys(dateKeys, anchorDateKey);
+}
+
+export function touchesLookbackBoundary(
+  streakStartDateKey: string | null,
+  lookbackStartDateKey: string,
+) {
+  if (!streakStartDateKey) return false;
+  const streakStartStamp = dateKeyToDayStamp(streakStartDateKey);
+  const lookbackStartStamp = dateKeyToDayStamp(lookbackStartDateKey);
+  if (streakStartStamp === null || lookbackStartStamp === null) return false;
+  return streakStartStamp <= lookbackStartStamp;
+}
+
+export function computeStreakFromDateKeys(dateKeys: string[], anchorDateKey?: string) {
+  const anchor = anchorDateKey ?? toDateKey(Date.now(), "UTC");
+  return computeCurrentStreakFromDateKeys(dateKeys, anchor).streakDays;
 }
 
 export function formatLastSync(timestamp?: number | null) {

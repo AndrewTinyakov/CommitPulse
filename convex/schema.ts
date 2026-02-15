@@ -28,6 +28,7 @@ export default defineSchema({
     userId: v.string(),
     installationId: v.number(),
     repoFullName: v.optional(v.string()),
+    lookbackDays: v.optional(v.number()),
     reason: v.union(
       v.literal("initial_backfill"),
       v.literal("push"),

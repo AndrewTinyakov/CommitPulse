@@ -7,44 +7,17 @@ import {
   query,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { computeStreakFromDateKeys, formatLastSync, toDateKey, uniquePush } from "./lib";
+import {
+  INITIAL_BACKFILL_DAYS,
+  computeCurrentStreakFromCommitEvents,
+  formatLastSync,
+  touchesLookbackBoundary,
+  toDateKey,
+  uniquePush,
+} from "./lib";
 import { getUserId, requireUserId } from "./auth";
 
 const MAX_JOB_ATTEMPTS = 6;
-
-async function computeStreakFromDailyStats(ctx: any, userId: string) {
-  const batchSize = 60;
-  const goals = await ctx.db
-    .query("goals")
-    .withIndex("by_user", (q: any) => q.eq("userId", userId))
-    .first();
-  const timeZone = goals?.timezone ?? "UTC";
-  let cursorDate: string | null = null;
-  const dateKeys: string[] = [];
-
-  while (true) {
-    const batch = await ctx.db
-      .query("dailyStats")
-      .withIndex("by_user_date", (q: any) =>
-        cursorDate ? q.eq("userId", userId).lt("date", cursorDate) : q.eq("userId", userId),
-      )
-      .order("desc")
-      .take(batchSize);
-
-    if (batch.length === 0) break;
-
-    for (const stat of batch) {
-      if (stat.commitCount > 0) {
-        dateKeys.push(stat.date);
-      }
-    }
-
-    if (batch.length < batchSize) break;
-    cursorDate = batch[batch.length - 1].date;
-  }
-
-  return computeStreakFromDateKeys(dateKeys, toDateKey(Date.now(), timeZone));
-}
 
 export const completeGithubAppSetup = action({
   args: {
@@ -68,6 +41,7 @@ export const completeGithubAppSetup = action({
       userId,
       installationId: args.installationId,
       reason: "initial_backfill",
+      lookbackDays: INITIAL_BACKFILL_DAYS,
       runAfter: Date.now(),
       status: "pending",
       attempt: 0,
@@ -125,6 +99,7 @@ export const recomputeFromScratch = action({
       userId,
       installationId: connection.installationId,
       reason: "initial_backfill",
+      lookbackDays: INITIAL_BACKFILL_DAYS,
       runAfter: Date.now(),
       status: "pending",
       attempt: 0,
@@ -196,6 +171,7 @@ export const getConnectionV2 = query({
       lastErrorCode: v.union(v.string(), v.null()),
       lastErrorMessage: v.union(v.string(), v.null()),
       hasPendingSync: v.boolean(),
+      activeBackfillLookbackDays: v.union(v.number(), v.null()),
     }),
     v.null(),
   ),
@@ -226,30 +202,34 @@ export const getConnectionV2 = query({
         lastErrorCode: null,
         lastErrorMessage: null,
         hasPendingSync: false,
+        activeBackfillLookbackDays: null,
       };
     }
 
-    const hasPending = connection.installationId
-      ? (
-          await ctx.db
-            .query("githubSyncJobs")
-            .withIndex("by_installation_status", (q) =>
-              q.eq("installationId", connection.installationId!).eq("status", "pending"),
-            )
-            .take(1)
-        ).length > 0
-      : false;
-    const hasProcessing = connection.installationId
-      ? (
-          await ctx.db
-            .query("githubSyncJobs")
-            .withIndex("by_installation_status", (q) =>
-              q.eq("installationId", connection.installationId!).eq("status", "processing"),
-            )
-            .take(1)
-        ).length > 0
-      : false;
-    const hasPendingSync = hasPending || hasProcessing;
+    const pendingJobs = connection.installationId
+      ? await ctx.db
+          .query("githubSyncJobs")
+          .withIndex("by_installation_status", (q) =>
+            q.eq("installationId", connection.installationId!).eq("status", "pending"),
+          )
+          .take(50)
+      : [];
+    const processingJobs = connection.installationId
+      ? await ctx.db
+          .query("githubSyncJobs")
+          .withIndex("by_installation_status", (q) =>
+            q.eq("installationId", connection.installationId!).eq("status", "processing"),
+          )
+          .take(50)
+      : [];
+    const hasPendingSync = pendingJobs.length > 0 || processingJobs.length > 0;
+    const backfillLookbacks = [...pendingJobs, ...processingJobs]
+      .filter((job) => job.reason === "initial_backfill")
+      .map((job) => job.lookbackDays)
+      .filter((value): value is number => typeof value === "number");
+    const activeBackfillLookbackDays = backfillLookbacks.length
+      ? Math.max(...backfillLookbacks)
+      : null;
 
     return {
       connected: true,
@@ -268,6 +248,7 @@ export const getConnectionV2 = query({
       lastErrorCode: connection.lastErrorCode ?? null,
       lastErrorMessage: connection.lastErrorMessage ?? null,
       hasPendingSync,
+      activeBackfillLookbackDays,
     };
   },
 });
@@ -501,6 +482,78 @@ const getConnectionByUser = internalQuery({
   },
 });
 
+const computeCurrentStreakSnapshot = internalQuery({
+  args: {
+    userId: v.string(),
+    anchorTimestamp: v.optional(v.number()),
+    lookbackDays: v.optional(v.number()),
+  },
+  returns: v.object({
+    timezone: v.string(),
+    anchorDateKey: v.string(),
+    streakDays: v.number(),
+    streakStartDateKey: v.union(v.string(), v.null()),
+    firstGapDateKey: v.union(v.string(), v.null()),
+    newestDateKey: v.union(v.string(), v.null()),
+    oldestDateKey: v.union(v.string(), v.null()),
+    touchesLookbackBoundary: v.boolean(),
+    lookbackStartDateKey: v.union(v.string(), v.null()),
+    commitEventsScanned: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const anchorTimestamp = args.anchorTimestamp ?? Date.now();
+    const goals = await ctx.db
+      .query("goals")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    const timezone = goals?.timezone ?? "UTC";
+
+    const committedAt: number[] = [];
+    let cursor: string | null = null;
+    const batchSize = 256;
+    const maxPages = 160;
+    for (let page = 0; page < maxPages; page += 1) {
+      const result = await ctx.db
+        .query("commitEvents")
+        .withIndex("by_user_date", (q) => q.eq("userId", args.userId))
+        .order("desc")
+        .paginate({ numItems: batchSize, cursor });
+      for (const commit of result.page) {
+        committedAt.push(commit.committedAt);
+      }
+      if (result.isDone) break;
+      cursor = result.continueCursor;
+      if (!cursor) break;
+    }
+
+    const computation = computeCurrentStreakFromCommitEvents(
+      committedAt,
+      timezone,
+      anchorTimestamp,
+    );
+    const lookbackStartDateKey =
+      args.lookbackDays !== undefined
+        ? toDateKey(anchorTimestamp - args.lookbackDays * 24 * 60 * 60 * 1000, timezone)
+        : null;
+
+    return {
+      timezone,
+      anchorDateKey: computation.anchorDateKey,
+      streakDays: computation.streakDays,
+      streakStartDateKey: computation.streakStartDateKey,
+      firstGapDateKey: computation.firstGapDateKey,
+      newestDateKey: computation.newestDateKey,
+      oldestDateKey: computation.oldestDateKey,
+      touchesLookbackBoundary:
+        lookbackStartDateKey === null
+          ? false
+          : touchesLookbackBoundary(computation.streakStartDateKey, lookbackStartDateKey),
+      lookbackStartDateKey,
+      commitEventsScanned: committedAt.length,
+    };
+  },
+});
+
 const clearGithubData = internalMutation({
   args: {
     userId: v.string(),
@@ -661,6 +714,7 @@ const markSynced = internalMutation({
     syncedToAt: v.optional(v.number()),
     streakDays: v.optional(v.number()),
     streakUpdatedAt: v.optional(v.number()),
+    syncStatus: v.optional(v.union(v.literal("idle"), v.literal("syncing"))),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -676,12 +730,12 @@ const markSynced = internalMutation({
         syncedToAt?: number;
         streakDays?: number;
         streakUpdatedAt?: number;
-        syncStatus: "idle";
+        syncStatus: "idle" | "syncing";
         lastErrorCode?: string;
         lastErrorMessage?: string;
       } = {
         lastSyncedAt: args.timestamp,
-        syncStatus: "idle",
+        syncStatus: args.syncStatus ?? "idle",
         lastErrorCode: undefined,
         lastErrorMessage: undefined,
       };
@@ -701,8 +755,11 @@ const markSynced = internalMutation({
         patch.streakUpdatedAt = args.streakUpdatedAt;
       }
       if (args.streakDays === undefined) {
-        const computedStreak = await computeStreakFromDailyStats(ctx, args.userId);
-        patch.streakDays = computedStreak;
+        const snapshot = await ctx.runQuery(internal.github.computeCurrentStreakSnapshot, {
+          userId: args.userId,
+          anchorTimestamp: args.timestamp,
+        });
+        patch.streakDays = snapshot.streakDays;
         patch.streakUpdatedAt = Date.now();
       }
       await ctx.db.patch(existing._id, patch);
@@ -780,6 +837,7 @@ const enqueueSyncJob = internalMutation({
     userId: v.string(),
     installationId: v.number(),
     repoFullName: v.optional(v.string()),
+    lookbackDays: v.optional(v.number()),
     reason: v.union(
       v.literal("initial_backfill"),
       v.literal("push"),
@@ -802,11 +860,27 @@ const enqueueSyncJob = internalMutation({
         .first();
       if (duplicate) return null;
     }
+    if (args.reason === "initial_backfill" && args.lookbackDays !== undefined) {
+      const statuses = ["pending", "processing"] as const;
+      for (const status of statuses) {
+        const existing = await ctx.db
+          .query("githubSyncJobs")
+          .withIndex("by_installation_status", (q) =>
+            q.eq("installationId", args.installationId).eq("status", status),
+          )
+          .take(50);
+        const duplicate = existing.find(
+          (job) => job.reason === "initial_backfill" && job.lookbackDays === args.lookbackDays,
+        );
+        if (duplicate) return null;
+      }
+    }
 
     await ctx.db.insert("githubSyncJobs", {
       userId: args.userId,
       installationId: args.installationId,
       repoFullName: args.repoFullName,
+      lookbackDays: args.lookbackDays,
       reason: args.reason,
       deliveryId: args.deliveryId,
       status: args.status,
@@ -829,6 +903,7 @@ const claimSyncJobs = internalMutation({
       userId: v.string(),
       installationId: v.number(),
       repoFullName: v.union(v.string(), v.null()),
+      lookbackDays: v.union(v.number(), v.null()),
       reason: v.union(
         v.literal("initial_backfill"),
         v.literal("push"),
@@ -849,6 +924,7 @@ const claimSyncJobs = internalMutation({
       userId: string;
       installationId: number;
       repoFullName: string | null;
+      lookbackDays: number | null;
       reason: "initial_backfill" | "push" | "installation_repositories" | "reconcile";
       attempt: number;
     }[];
@@ -863,6 +939,7 @@ const claimSyncJobs = internalMutation({
         userId: job.userId,
         installationId: job.installationId,
         repoFullName: job.repoFullName ?? null,
+        lookbackDays: job.lookbackDays ?? null,
         reason: job.reason,
         attempt: job.attempt,
       });
@@ -920,6 +997,7 @@ const failSyncJob = internalMutation({
 export {
   clearGithubData,
   claimSyncJobs,
+  computeCurrentStreakSnapshot,
   completeSyncJob,
   enqueueSyncJob,
   failSyncJob,

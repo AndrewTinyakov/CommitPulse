@@ -10,7 +10,8 @@
     "build": "turbo run build",
     "build:prod": "node scripts/prod-build.mjs",
     "lint": "turbo run lint",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "test:streak": "node --test --experimental-strip-types convex/lib.streak.test.ts"
   },
   "dependencies": {
     "telegraf": "^4.16.2"

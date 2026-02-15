@@ -5,12 +5,16 @@ import { createSign } from "crypto";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import {
+  BACKFILL_STEP_DAYS,
+  INITIAL_BACKFILL_DAYS,
+  MAX_BACKFILL_DAYS,
+} from "./lib";
 
 const GITHUB_API = "https://api.github.com";
 const SYNC_SAFETY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REPO_LIMIT = 120;
 const DEFAULT_COMMIT_PAGE_LIMIT = 3;
-const BASE_BACKFILL_DAYS = 365;
 const WORKER_BATCH_SIZE = 8;
 const WORKER_CONCURRENCY = 3;
 
@@ -19,6 +23,7 @@ type SyncJob = {
   userId: string;
   installationId: number;
   repoFullName: string | null;
+  lookbackDays: number | null;
   reason: "initial_backfill" | "push" | "installation_repositories" | "reconcile";
   attempt: number;
 };
@@ -166,11 +171,17 @@ async function processJob(ctx: any, job: SyncJob) {
 
   const installationToken = await getInstallationToken(job.installationId);
 
-  const backfillDays = Math.max(BASE_BACKFILL_DAYS, connection.streakDays ?? 0);
+  const requestedLookbackDays =
+    job.reason === "initial_backfill"
+      ? Math.max(
+          INITIAL_BACKFILL_DAYS,
+          Math.min(MAX_BACKFILL_DAYS, job.lookbackDays ?? INITIAL_BACKFILL_DAYS),
+        )
+      : null;
   const now = Date.now();
-  const shouldBackfill = !connection.historySyncedAt || job.reason === "initial_backfill";
+  const shouldBackfill = job.reason === "initial_backfill";
   const sinceTimestamp = shouldBackfill
-    ? now - backfillDays * 24 * 60 * 60 * 1000
+    ? now - (requestedLookbackDays ?? INITIAL_BACKFILL_DAYS) * 24 * 60 * 60 * 1000
     : Math.max(0, (connection.lastSyncedAt ?? now) - SYNC_SAFETY_WINDOW_MS);
   const sinceIso = new Date(sinceTimestamp).toISOString();
 
@@ -220,12 +231,62 @@ async function processJob(ctx: any, job: SyncJob) {
     }
   }
 
+  const streakSnapshot = await ctx.runQuery(internal.github.computeCurrentStreakSnapshot, {
+    userId: connection.userId,
+    anchorTimestamp: now,
+    lookbackDays: requestedLookbackDays ?? undefined,
+  });
+  const shouldExtendBackfill =
+    job.reason === "initial_backfill" &&
+    streakSnapshot.touchesLookbackBoundary &&
+    (requestedLookbackDays ?? INITIAL_BACKFILL_DAYS) < MAX_BACKFILL_DAYS;
+  const nextLookbackDays = shouldExtendBackfill
+    ? Math.min(MAX_BACKFILL_DAYS, (requestedLookbackDays ?? INITIAL_BACKFILL_DAYS) + BACKFILL_STEP_DAYS)
+    : null;
+
+  if (shouldExtendBackfill && nextLookbackDays !== null) {
+    await ctx.runMutation(internal.github.enqueueSyncJob, {
+      userId: connection.userId,
+      installationId: job.installationId,
+      reason: "initial_backfill",
+      lookbackDays: nextLookbackDays,
+      runAfter: now,
+      status: "pending",
+      attempt: 0,
+    });
+    console.log(
+      JSON.stringify({
+        msg: "Extending initial backfill",
+        userId: connection.userId,
+        installationId: job.installationId,
+        lookbackDays: requestedLookbackDays,
+        streakDays: streakSnapshot.streakDays,
+        touchesLookbackBoundary: streakSnapshot.touchesLookbackBoundary,
+        nextLookbackDays,
+      }),
+    );
+  } else if (job.reason === "initial_backfill") {
+    console.log(
+      JSON.stringify({
+        msg: "Initial backfill boundary resolved",
+        userId: connection.userId,
+        installationId: job.installationId,
+        lookbackDays: requestedLookbackDays,
+        streakDays: streakSnapshot.streakDays,
+        touchesLookbackBoundary: streakSnapshot.touchesLookbackBoundary,
+      }),
+    );
+  }
+
   await ctx.runMutation(internal.github.markSynced, {
     userId: connection.userId,
     timestamp: now,
-    historySyncedAt: shouldBackfill ? now : undefined,
+    historySyncedAt: shouldBackfill && !shouldExtendBackfill ? now : undefined,
     syncedFromAt: earliest ?? undefined,
     syncedToAt: latest ?? undefined,
+    streakDays: streakSnapshot.streakDays,
+    streakUpdatedAt: now,
+    syncStatus: shouldExtendBackfill ? "syncing" : "idle",
   });
 
   await ctx.runMutation(internal.github.completeSyncJob, { jobId: job.id });
@@ -263,16 +324,18 @@ export const runSyncWorker = internalAction({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
-    const claimed = (await ctx.runMutation(internal.github.claimSyncJobs, {
-      limit: WORKER_BATCH_SIZE,
-      now: Date.now(),
-    })) as SyncJob[];
+    const maxRounds = 6;
+    for (let round = 0; round < maxRounds; round += 1) {
+      const claimed = (await ctx.runMutation(internal.github.claimSyncJobs, {
+        limit: WORKER_BATCH_SIZE,
+        now: Date.now(),
+      })) as SyncJob[];
+      if (!claimed.length) break;
 
-    if (!claimed.length) return null;
-
-    await runBatches(claimed, WORKER_CONCURRENCY, async (job) => {
-      await processJobWithRetry(ctx, job);
-    });
+      await runBatches(claimed, WORKER_CONCURRENCY, async (job) => {
+        await processJobWithRetry(ctx, job);
+      });
+    }
 
     return null;
   },
