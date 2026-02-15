@@ -7,18 +7,15 @@ import {
   query,
 } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { formatLastSync, toDateKey, uniquePush } from "./lib";
+import { computeStreakFromDateKeys, formatLastSync, toDateKey, uniquePush } from "./lib";
 import { getUserId, requireUserId } from "./auth";
 
 const MAX_JOB_ATTEMPTS = 6;
 
 async function computeStreakFromDailyStats(ctx: any, userId: string) {
   const batchSize = 60;
-  const dayMs = 24 * 60 * 60 * 1000;
-  const toDayStamp = (dateKey: string) => new Date(`${dateKey}T00:00:00Z`).getTime();
-  let streakDays = 0;
-  let lastDate: string | null = null;
   let cursorDate: string | null = null;
+  const dateKeys: string[] = [];
 
   while (true) {
     const batch = await ctx.db
@@ -32,24 +29,16 @@ async function computeStreakFromDailyStats(ctx: any, userId: string) {
     if (batch.length === 0) break;
 
     for (const stat of batch) {
-      if (stat.commitCount === 0) return streakDays;
-      if (!lastDate) {
-        streakDays = 1;
-        lastDate = stat.date;
-        continue;
+      if (stat.commitCount > 0) {
+        dateKeys.push(stat.date);
       }
-      if (stat.date === lastDate) continue;
-      const diffDays = Math.round((toDayStamp(lastDate) - toDayStamp(stat.date)) / dayMs);
-      if (diffDays !== 1) return streakDays;
-      streakDays += 1;
-      lastDate = stat.date;
     }
 
     if (batch.length < batchSize) break;
     cursorDate = batch[batch.length - 1].date;
   }
 
-  return streakDays;
+  return computeStreakFromDateKeys(dateKeys);
 }
 
 export const completeGithubAppSetup = action({

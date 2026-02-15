@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { query, type QueryCtx } from "./_generated/server";
 import { getUserId } from "./auth";
-import { formatLastSync, toDateKey } from "./lib";
+import { computeStreakFromDateKeys, formatLastSync, toDateKey } from "./lib";
 
 const goalsValidator = v.object({
   commitsPerDay: v.number(),
@@ -112,7 +112,7 @@ export const getOverview = query({
       .query("githubConnections")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const streakDays = connection?.streakDays ?? (await computeStreakDays(ctx, userId));
+    const streakDays = await computeStreakDays(ctx, userId);
 
     return {
       todayCommits: todayStats?.commitCount ?? 0,
@@ -128,11 +128,8 @@ export const getOverview = query({
 
 async function computeStreakDays(ctx: QueryCtx, userId: string) {
   const batchSize = 60;
-  const dayMs = 24 * 60 * 60 * 1000;
-  const toDayStamp = (dateKey: string) => new Date(`${dateKey}T00:00:00Z`).getTime();
-  let streakDays = 0;
-  let lastDate: string | null = null;
   let cursorDate: string | null = null;
+  const dateKeys: string[] = [];
 
   while (true) {
     const batch = await ctx.db
@@ -148,23 +145,9 @@ async function computeStreakDays(ctx: QueryCtx, userId: string) {
     }
 
     for (const stat of batch) {
-      if (stat.commitCount === 0) {
-        return streakDays;
+      if (stat.commitCount > 0) {
+        dateKeys.push(stat.date);
       }
-      if (!lastDate) {
-        streakDays = 1;
-        lastDate = stat.date;
-        continue;
-      }
-      if (stat.date === lastDate) {
-        continue;
-      }
-      const diffDays = Math.round((toDayStamp(lastDate) - toDayStamp(stat.date)) / dayMs);
-      if (diffDays !== 1) {
-        return streakDays;
-      }
-      streakDays += 1;
-      lastDate = stat.date;
     }
 
     if (batch.length < batchSize) {
@@ -173,7 +156,7 @@ async function computeStreakDays(ctx: QueryCtx, userId: string) {
     cursorDate = batch[batch.length - 1].date;
   }
 
-  return streakDays;
+  return computeStreakFromDateKeys(dateKeys);
 }
 
 export const getStatsRange = query({
