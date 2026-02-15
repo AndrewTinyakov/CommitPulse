@@ -9,12 +9,14 @@ import {
   BACKFILL_STEP_DAYS,
   INITIAL_BACKFILL_DAYS,
   MAX_BACKFILL_DAYS,
+  computeCurrentStreakFromDateKeys,
 } from "./lib";
 
 const GITHUB_API = "https://api.github.com";
 const SYNC_SAFETY_WINDOW_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REPO_LIMIT = 120;
 const DEFAULT_COMMIT_PAGE_LIMIT = 8;
+const CONTRIBUTION_STREAK_LOOKBACK_DAYS = 1825;
 const WORKER_BATCH_SIZE = 8;
 const WORKER_CONCURRENCY = 3;
 
@@ -177,6 +179,54 @@ function getContributionBranches(defaultBranch?: string | null) {
   return Array.from(branches);
 }
 
+async function fetchGithubContributionStreakDays(
+  githubLogin: string | null | undefined,
+  anchorTimestamp: number,
+) {
+  if (!githubLogin || !githubLogin.trim()) {
+    return null;
+  }
+
+  const anchorDate = new Date(anchorTimestamp);
+  const anchorDateKey = anchorDate.toISOString().slice(0, 10);
+  const fromDateKey = new Date(
+    anchorTimestamp - CONTRIBUTION_STREAK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  )
+    .toISOString()
+    .slice(0, 10);
+  const url = `https://github.com/users/${encodeURIComponent(
+    githubLogin.trim(),
+  )}/contributions?from=${fromDateKey}&to=${anchorDateKey}`;
+
+  try {
+    const response = await fetch(url, {
+      headers: { "User-Agent": "commit-tracker" },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const html = await response.text();
+
+    const activeDateKeys = new Set<string>();
+    const cells = html.match(/<td[^>]*>/g) ?? [];
+    for (const cell of cells) {
+      const dateMatch = /data-date="(\d{4}-\d{2}-\d{2})"/.exec(cell);
+      const levelMatch = /data-level="([0-4])"/.exec(cell);
+      if (!dateMatch || !levelMatch) continue;
+      if (Number(levelMatch[1]) > 0) {
+        activeDateKeys.add(dateMatch[1]);
+      }
+    }
+
+    if (activeDateKeys.size === 0) {
+      return 0;
+    }
+    return computeCurrentStreakFromDateKeys(Array.from(activeDateKeys), anchorDateKey).streakDays;
+  } catch {
+    return null;
+  }
+}
+
 async function processJob(ctx: any, job: SyncJob) {
   const connection = await ctx.runQuery(internal.github.getConnectionByInstallation, {
     installationId: job.installationId,
@@ -275,6 +325,11 @@ async function processJob(ctx: any, job: SyncJob) {
     anchorTimestamp: now,
     lookbackDays: requestedLookbackDays ?? undefined,
   });
+  const githubCalendarStreakDays = await fetchGithubContributionStreakDays(
+    connection.githubLogin,
+    now,
+  );
+  const streakDays = githubCalendarStreakDays ?? streakSnapshot.streakDays;
   const shouldExtendBackfill =
     job.reason === "initial_backfill" &&
     streakSnapshot.touchesLookbackBoundary &&
@@ -299,7 +354,8 @@ async function processJob(ctx: any, job: SyncJob) {
         userId: connection.userId,
         installationId: job.installationId,
         lookbackDays: requestedLookbackDays,
-        streakDays: streakSnapshot.streakDays,
+        streakDays,
+        githubCalendarStreakDays,
         touchesLookbackBoundary: streakSnapshot.touchesLookbackBoundary,
         nextLookbackDays,
       }),
@@ -311,7 +367,8 @@ async function processJob(ctx: any, job: SyncJob) {
         userId: connection.userId,
         installationId: job.installationId,
         lookbackDays: requestedLookbackDays,
-        streakDays: streakSnapshot.streakDays,
+        streakDays,
+        githubCalendarStreakDays,
         touchesLookbackBoundary: streakSnapshot.touchesLookbackBoundary,
       }),
     );
@@ -323,7 +380,7 @@ async function processJob(ctx: any, job: SyncJob) {
     historySyncedAt: shouldBackfill && !shouldExtendBackfill ? now : undefined,
     syncedFromAt: earliest ?? undefined,
     syncedToAt: latest ?? undefined,
-    streakDays: streakSnapshot.streakDays,
+    streakDays,
     streakUpdatedAt: now,
     syncStatus: shouldExtendBackfill ? "syncing" : "idle",
   });

@@ -231,7 +231,7 @@ export const getOverview = query({
       userId,
       Date.now(),
     );
-    const streakDays = streakSnapshot.streakDays;
+    const streakDays = connection?.streakDays ?? streakSnapshot.streakDays;
 
     return {
       todayCommits: todayStats?.commitCount ?? 0,
