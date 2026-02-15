@@ -88,18 +88,59 @@ export const completeGithubAppSetup = action({
   },
 });
 
-export const disconnect = mutation({
+export const disconnect = action({
   args: {},
   returns: v.null(),
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
-    const connection = await ctx.db
-      .query("githubConnections")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .first();
-    if (connection) {
-      await ctx.db.delete(connection._id);
+    const connection = await ctx.runQuery(internal.github.getConnectionByUser, { userId });
+    if (!connection) {
+      return null;
     }
+
+    await ctx.runMutation(internal.github.clearGithubData, {
+      userId,
+      installationId: connection.installationId ?? undefined,
+      clearConnection: true,
+    });
+
+    return null;
+  },
+});
+
+export const recomputeFromScratch = action({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const userId = await requireUserId(ctx);
+    const connection = await ctx.runQuery(internal.github.getConnectionByUser, { userId });
+    if (!connection || !connection.installationId) {
+      throw new ConvexError({
+        code: "GITHUB_NOT_CONNECTED",
+        message: "Connect GitHub App before recomputing stats",
+      });
+    }
+
+    await ctx.runMutation(internal.github.clearGithubData, {
+      userId,
+      installationId: connection.installationId,
+      clearConnection: false,
+    });
+    await ctx.runMutation(internal.github.resetConnectionForResync, { userId });
+    await ctx.runMutation(internal.github.enqueueSyncJob, {
+      userId,
+      installationId: connection.installationId,
+      reason: "initial_backfill",
+      runAfter: Date.now(),
+      status: "pending",
+      attempt: 0,
+    });
+    await ctx.runMutation(internal.github.setSyncStatus, {
+      userId,
+      status: "syncing",
+    });
+    await ctx.runAction((internal as any).githubNode.runSyncWorker, {});
+
     return null;
   },
 });
@@ -288,6 +329,46 @@ export const ingestWebhookEvent = mutation({
     await ctx.db.patch(connection._id, { lastWebhookAt: now });
 
     if (args.event === "installation" && args.setupAction === "deleted") {
+      const batchSize = 128;
+
+      while (true) {
+        const rows = await ctx.db
+          .query("commitEvents")
+          .withIndex("by_user", (q) => q.eq("userId", connection.userId))
+          .take(batchSize);
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          await ctx.db.delete(row._id);
+        }
+      }
+
+      while (true) {
+        const rows = await ctx.db
+          .query("dailyStats")
+          .withIndex("by_user_date", (q) => q.eq("userId", connection.userId))
+          .take(batchSize);
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          await ctx.db.delete(row._id);
+        }
+      }
+
+      const statuses = ["pending", "processing", "completed", "failed"] as const;
+      for (const status of statuses) {
+        while (true) {
+          const rows = await ctx.db
+            .query("githubSyncJobs")
+            .withIndex("by_installation_status", (q) =>
+              q.eq("installationId", args.installationId!).eq("status", status),
+            )
+            .take(batchSize);
+          if (rows.length === 0) break;
+          for (const row of rows) {
+            await ctx.db.delete(row._id);
+          }
+        }
+      }
+
       await ctx.db.delete(connection._id);
       return { accepted: true, duplicate: false };
     }
@@ -397,6 +478,113 @@ const upsertAppConnection = internalMutation({
     } else {
       await ctx.db.insert("githubConnections", payload);
     }
+
+    return null;
+  },
+});
+
+const getConnectionByUser = internalQuery({
+  args: { userId: v.string() },
+  returns: v.union(
+    v.object({
+      installationId: v.union(v.number(), v.null()),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!connection) return null;
+    return { installationId: connection.installationId ?? null };
+  },
+});
+
+const clearGithubData = internalMutation({
+  args: {
+    userId: v.string(),
+    installationId: v.optional(v.number()),
+    clearConnection: v.boolean(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const batchSize = 128;
+
+    while (true) {
+      const rows = await ctx.db
+        .query("commitEvents")
+        .withIndex("by_user", (q) => q.eq("userId", args.userId))
+        .take(batchSize);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        await ctx.db.delete(row._id);
+      }
+    }
+
+    while (true) {
+      const rows = await ctx.db
+        .query("dailyStats")
+        .withIndex("by_user_date", (q) => q.eq("userId", args.userId))
+        .take(batchSize);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        await ctx.db.delete(row._id);
+      }
+    }
+
+    if (args.installationId !== undefined) {
+      const statuses = ["pending", "processing", "completed", "failed"] as const;
+      for (const status of statuses) {
+        while (true) {
+          const rows = await ctx.db
+            .query("githubSyncJobs")
+            .withIndex("by_installation_status", (q) =>
+              q.eq("installationId", args.installationId!).eq("status", status),
+            )
+            .take(batchSize);
+          if (rows.length === 0) break;
+          for (const row of rows) {
+            await ctx.db.delete(row._id);
+          }
+        }
+      }
+    }
+
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (connection && args.clearConnection) {
+      await ctx.db.delete(connection._id);
+    }
+
+    return null;
+  },
+});
+
+const resetConnectionForResync = internalMutation({
+  args: { userId: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const connection = await ctx.db
+      .query("githubConnections")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .first();
+    if (!connection) return null;
+
+    await ctx.db.patch(connection._id, {
+      lastSyncedAt: undefined,
+      historySyncedAt: undefined,
+      syncedFromAt: undefined,
+      syncedToAt: undefined,
+      syncStatus: "idle",
+      lastWebhookAt: undefined,
+      lastErrorCode: undefined,
+      lastErrorMessage: undefined,
+      streakDays: undefined,
+      streakUpdatedAt: undefined,
+    });
 
     return null;
   },
@@ -730,12 +918,15 @@ const failSyncJob = internalMutation({
 });
 
 export {
+  clearGithubData,
   claimSyncJobs,
   completeSyncJob,
   enqueueSyncJob,
   failSyncJob,
+  getConnectionByUser,
   getConnectionByInstallation,
   markSynced,
+  resetConnectionForResync,
   saveCommit,
   setSyncStatus,
   upsertAppConnection,

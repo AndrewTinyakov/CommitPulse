@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useAction } from "convex/react";
+import { useQuery, useAction } from "convex/react";
 import { GitBranch, ShieldCheck, Timer, Wifi, AlertTriangle, Link as LinkIcon } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
@@ -21,7 +21,8 @@ export default function GitHubConnectCard() {
   const searchParams = useSearchParams();
   const connection = useQuery(api.github.getConnectionV2, isSignedIn ? {} : "skip");
   const completeGithubAppSetup = useAction(api.github.completeGithubAppSetup);
-  const disconnect = useMutation(api.github.disconnect);
+  const disconnect = useAction(api.github.disconnect);
+  const recomputeFromScratch = useAction(api.github.recomputeFromScratch);
 
   const [status, setStatus] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
@@ -84,7 +85,23 @@ export default function GitHubConnectCard() {
     setStatus(null);
     try {
       await disconnect({});
-      setStatus("GitHub disconnected.");
+      setStatus("GitHub disconnected. All synced stats were removed.");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const handleRecompute = async () => {
+    const confirmed = window.confirm(
+      "This will delete all synced GitHub stats and resync everything from scratch. Continue?",
+    );
+    if (!confirmed) return;
+
+    setWorking(true);
+    setStatus(null);
+    try {
+      await recomputeFromScratch({});
+      setStatus("Recompute started. We deleted existing stats and kicked off a full resync.");
     } finally {
       setWorking(false);
     }
@@ -142,6 +159,15 @@ export default function GitHubConnectCard() {
           <LinkIcon className="mr-2 inline h-3 w-3" />
           Manage permissions
         </a>
+        {isConnected && (
+          <button
+            onClick={handleRecompute}
+            disabled={working}
+            className="rounded-full border border-[rgba(81,214,255,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)] disabled:opacity-50"
+          >
+            Recompute stats
+          </button>
+        )}
         {isConnected && (
           <button
             onClick={handleDisconnect}
