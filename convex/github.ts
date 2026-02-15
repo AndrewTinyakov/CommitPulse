@@ -12,6 +12,46 @@ import { getUserId, requireUserId } from "./auth";
 
 const MAX_JOB_ATTEMPTS = 6;
 
+async function computeStreakFromDailyStats(ctx: any, userId: string) {
+  const batchSize = 60;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const toDayStamp = (dateKey: string) => new Date(`${dateKey}T00:00:00Z`).getTime();
+  let streakDays = 0;
+  let lastDate: string | null = null;
+  let cursorDate: string | null = null;
+
+  while (true) {
+    const batch = await ctx.db
+      .query("dailyStats")
+      .withIndex("by_user_date", (q: any) =>
+        cursorDate ? q.eq("userId", userId).lt("date", cursorDate) : q.eq("userId", userId),
+      )
+      .order("desc")
+      .take(batchSize);
+
+    if (batch.length === 0) break;
+
+    for (const stat of batch) {
+      if (stat.commitCount === 0) return streakDays;
+      if (!lastDate) {
+        streakDays = 1;
+        lastDate = stat.date;
+        continue;
+      }
+      if (stat.date === lastDate) continue;
+      const diffDays = Math.round((toDayStamp(lastDate) - toDayStamp(stat.date)) / dayMs);
+      if (diffDays !== 1) return streakDays;
+      streakDays += 1;
+      lastDate = stat.date;
+    }
+
+    if (batch.length < batchSize) break;
+    cursorDate = batch[batch.length - 1].date;
+  }
+
+  return streakDays;
+}
+
 export const completeGithubAppSetup = action({
   args: {
     installationId: v.number(),
@@ -342,6 +382,10 @@ const upsertAppConnection = internalMutation({
       installationAccountLogin: args.installationAccountLogin,
       installationAccountType: args.installationAccountType,
       repoSelectionMode: args.repoSelectionMode,
+      githubLogin:
+        args.installationAccountType === "User"
+          ? args.installationAccountLogin
+          : existing?.githubLogin,
       syncStatus: "idle" as const,
       connectedAt: Date.now(),
       lastErrorCode: undefined,
@@ -467,6 +511,11 @@ const markSynced = internalMutation({
       }
       if (args.streakUpdatedAt !== undefined) {
         patch.streakUpdatedAt = args.streakUpdatedAt;
+      }
+      if (args.streakDays === undefined) {
+        const computedStreak = await computeStreakFromDailyStats(ctx, args.userId);
+        patch.streakDays = computedStreak;
+        patch.streakUpdatedAt = Date.now();
       }
       await ctx.db.patch(existing._id, patch);
     }

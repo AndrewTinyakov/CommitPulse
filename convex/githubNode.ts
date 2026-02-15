@@ -131,10 +131,17 @@ async function fetchInstallationRepos(token: string, limit = DEFAULT_REPO_LIMIT)
   return repos.slice(0, limit);
 }
 
-async function fetchCommits(token: string, repoFullName: string, sinceIso: string, commitPageLimit: number) {
+async function fetchCommits(
+  token: string,
+  repoFullName: string,
+  sinceIso: string,
+  commitPageLimit: number,
+  authorLogin?: string | null,
+) {
   const commits: { sha: string }[] = [];
   for (let page = 1; page <= commitPageLimit; page += 1) {
-    const url = `${GITHUB_API}/repos/${repoFullName}/commits?since=${encodeURIComponent(sinceIso)}&per_page=100&page=${page}`;
+    const authorPart = authorLogin ? `&author=${encodeURIComponent(authorLogin)}` : "";
+    const url = `${GITHUB_API}/repos/${repoFullName}/commits?since=${encodeURIComponent(sinceIso)}${authorPart}&per_page=100&page=${page}`;
     const batch = await githubRequest<{ sha: string }[]>(token, url);
     if (!batch.length) break;
     commits.push(...batch);
@@ -177,7 +184,13 @@ async function processJob(ctx: any, job: SyncJob) {
 
   for (const repo of repos) {
     if (repo.archived || repo.disabled) continue;
-    const commits = await fetchCommits(installationToken, repo.full_name, sinceIso, DEFAULT_COMMIT_PAGE_LIMIT);
+    const commits = await fetchCommits(
+      installationToken,
+      repo.full_name,
+      sinceIso,
+      DEFAULT_COMMIT_PAGE_LIMIT,
+      connection.githubLogin,
+    );
 
     for (const commit of commits) {
       const detail = await githubRequest<{
