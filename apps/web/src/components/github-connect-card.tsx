@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useAction } from "convex/react";
-import { GitBranch, ShieldCheck, Timer, Wifi, AlertTriangle, Link as LinkIcon } from "lucide-react";
+import { GitBranch, ShieldCheck, Timer, Wifi, AlertTriangle, Link as LinkIcon, Copy } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
 import { api } from "@convex/_generated/api";
@@ -20,6 +20,7 @@ export default function GitHubConnectCard() {
   const { isSignedIn } = useAuth();
   const searchParams = useSearchParams();
   const connection = useQuery(api.github.getConnectionV2, isSignedIn ? {} : "skip");
+  const streakDebug = useQuery(api.dashboard.getStreakDebug as any, isSignedIn ? {} : "skip") as any;
   const completeGithubAppSetup = useAction(api.github.completeGithubAppSetup);
   const disconnect = useAction(api.github.disconnect);
   const recomputeFromScratch = useAction(api.github.recomputeFromScratch);
@@ -107,6 +108,27 @@ export default function GitHubConnectCard() {
     }
   };
 
+  const handleCopyStreakDebug = async () => {
+    const debugDump = typeof streakDebug?.debugDump === "string" ? streakDebug.debugDump : null;
+    if (!debugDump) {
+      if (streakDebug === undefined) {
+        setStatus("Preparing streak debug dump. Try again in a couple of seconds.");
+      } else {
+        setStatus("No streak debug dump available yet.");
+      }
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(debugDump);
+      setStatus("Streak debug dump copied. Paste it in chat.");
+    } catch (error) {
+      console.error(error);
+      console.log(debugDump);
+      setStatus("Clipboard copy failed. Debug dump was printed to browser console.");
+    }
+  };
+
   const statusLabel = useMemo(() => {
     const syncStatus = connection?.syncStatus;
     if (!syncStatus) return "Idle";
@@ -172,6 +194,16 @@ export default function GitHubConnectCard() {
             className="rounded-full border border-[rgba(81,214,255,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)] disabled:opacity-50"
           >
             Recompute stats
+          </button>
+        )}
+        {isConnected && (
+          <button
+            onClick={handleCopyStreakDebug}
+            disabled={working || streakDebug === undefined}
+            className="rounded-full border border-[rgba(255,255,255,0.25)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)] disabled:opacity-50"
+          >
+            <Copy className="mr-2 inline h-3 w-3" />
+            Copy streak debug
           </button>
         )}
         {isConnected && (
