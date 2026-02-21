@@ -5,9 +5,10 @@ import { action, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUserId } from "./auth";
 
-const DEFAULT_REMINDER_GAP_MS = 6 * 60 * 60 * 1000;
 const RECENT_COMMIT_GRACE_MS = 90 * 60 * 1000;
 const TELEGRAM_API_BASE = "https://api.telegram.org";
+const ZERO_PUSH_EXTRA_HOURS = new Set([19, 20]);
+const ZERO_PUSH_CRITICAL_HOURS = new Set([22, 23]);
 
 function getBotToken() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -45,6 +46,16 @@ function hourInTimeZone(timestamp: number, timeZone: string) {
     hour12: false,
   });
   return Number(formatter.format(new Date(timestamp)));
+}
+
+function dateKeyInTimeZone(timestamp: number, timeZone: string) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  return formatter.format(new Date(timestamp));
 }
 
 function isQuietHour(hour: number, start?: number | null, end?: number | null) {
@@ -111,40 +122,54 @@ export const sendSmartReminders = internalAction({
         continue;
       }
 
-      if (lastNotifiedAt && now - lastNotifiedAt < DEFAULT_REMINDER_GAP_MS) {
-        continue;
-      }
-
       const commitGoal = goals?.commitsPerDay ?? 1;
       const locGoal = goals?.locPerDay ?? 50;
       const pushByHour = goals?.pushByHour ?? 18;
 
-      if (hour < pushByHour) {
-        continue;
-      }
-
       const commitCount = stats?.commitCount ?? 0;
       const locChanged = stats?.locChanged ?? 0;
 
-      if (commitGoal <= 0 && locGoal <= 0) {
+      const needsCommit = commitGoal > 0 && commitCount < commitGoal;
+      const needsLoc = locGoal > 0 && locChanged < locGoal;
+      const missedGoals = (commitGoal > 0 || locGoal > 0) && (needsCommit || needsLoc);
+      const noPushesToday = commitCount === 0;
+
+      const shouldSendNormalReminder = hour === pushByHour && missedGoals;
+      const shouldSendZeroPushFollowUp = noPushesToday && ZERO_PUSH_EXTRA_HOURS.has(hour);
+      const shouldSendCriticalZeroPush = noPushesToday && ZERO_PUSH_CRITICAL_HOURS.has(hour);
+
+      if (
+        !shouldSendNormalReminder &&
+        !shouldSendZeroPushFollowUp &&
+        !shouldSendCriticalZeroPush
+      ) {
         continue;
       }
 
-      const needsCommit = commitGoal > 0 && commitCount < commitGoal;
-      const needsLoc = locGoal > 0 && locChanged < locGoal;
+      if (lastNotifiedAt) {
+        const lastNotifiedHour = hourInTimeZone(lastNotifiedAt, timeZone);
+        const sameDay =
+          dateKeyInTimeZone(lastNotifiedAt, timeZone) === dateKeyInTimeZone(now, timeZone);
+        if (sameDay && lastNotifiedHour === hour) {
+          continue;
+        }
+      }
 
-      if (!needsCommit && !needsLoc) {
+      if (!shouldSendZeroPushFollowUp && !shouldSendCriticalZeroPush && !missedGoals) {
         continue;
       }
 
       const remainingCommits = Math.max(commitGoal - commitCount, 0);
       const remainingLoc = Math.max(locGoal - locChanged, 0);
 
-      const message =
-        `CommitPulse nudge ⚡\n` +
-        `Today: ${commitCount} commits, ${locChanged} LOC.\n` +
-        `Goal: ${commitGoal} commits / ${locGoal} LOC.\n` +
-        `Remaining: ${remainingCommits} commits, ${remainingLoc} LOC.`;
+      const message = shouldSendCriticalZeroPush
+        ? `CRITICAL 🔴🔴\nNo pushes today yet.\nIt is already ${hour}:00.\nPush a commit now to keep your streak alive.`
+        : shouldSendZeroPushFollowUp
+          ? `CommitPulse alert 🚨\nNo pushes today yet.\nTime: ${hour}:00.\nMake your first push now.`
+          : `CommitPulse nudge ⚡\n` +
+            `Today: ${commitCount} commits, ${locChanged} LOC.\n` +
+            `Goal: ${commitGoal} commits / ${locGoal} LOC.\n` +
+            `Remaining: ${remainingCommits} commits, ${remainingLoc} LOC.`;
 
       await sendTelegramMessage(token, chatId, message);
       await ctx.runMutation(internal.telegram.markNotified, {
