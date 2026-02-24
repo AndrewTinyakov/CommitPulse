@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
-import { Bell, ExternalLink, MessageCircle, Send } from "lucide-react";
+import { Bell, ExternalLink, MessageCircle, Send, Unplug } from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { api } from "@convex/_generated/api";
+import { Card, CardHeader } from "./ui/card";
 
 type StartResponse = {
   token: string;
@@ -27,6 +28,7 @@ export default function TelegramConnectCard() {
   );
 
   const isConnected = Boolean(connection?.connected);
+  const isEnabled = Boolean(connection?.enabled);
 
   useEffect(() => {
     if (!session) return;
@@ -59,7 +61,7 @@ export default function TelegramConnectCard() {
       const data = (await response.json()) as StartResponse;
       setPending(data);
       window.open(data.url, "_blank", "noopener,noreferrer");
-    } catch (error) {
+    } catch {
       setStatus("Could not start Telegram login.");
     } finally {
       setLoading(false);
@@ -73,7 +75,7 @@ export default function TelegramConnectCard() {
     try {
       await testMessage({});
       setStatus("Test message sent.");
-    } catch (error) {
+    } catch {
       setStatus("Could not send test message.");
     } finally {
       setLoading(false);
@@ -92,120 +94,108 @@ export default function TelegramConnectCard() {
     }
   };
 
-  return (
-    <div className="panel flex h-full flex-col rounded-3xl px-6 py-6">
-      <div className="flex items-center gap-3">
-        <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(183,255,72,0.3)] bg-[rgba(183,255,72,0.12)] text-[var(--accent)]">
-          <Bell className="h-4 w-4" />
-        </span>
-        <div>
-          <p className="headline text-xs text-[var(--muted)]">Telegram</p>
-          <p className="text-lg font-semibold">Smart reminders</p>
-        </div>
-      </div>
+  const statusBadge = isConnected
+    ? isEnabled ? "green" : "amber"
+    : "";
+  const statusText = isConnected
+    ? isEnabled ? "Active" : "Paused"
+    : "Offline";
+  const statusDotClass = isConnected
+    ? isEnabled ? "online" : "offline"
+    : "offline";
 
-      <div className="mt-4 space-y-3 text-sm text-[var(--muted)]">
-        {!isConnected && (
-          <p>
-            Connect the shared bot once. We will store your Telegram chat so we can send smart nudges.
-          </p>
-        )}
-        {isConnected && (
-          <p>
-            Telegram is connected{connection?.telegramUsername ? ` as @${connection.telegramUsername}` : "."}
-          </p>
-        )}
-        <div className="flex flex-wrap gap-2 text-xs">
-          <span className="flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] px-2 py-1">
-            <MessageCircle className="h-3 w-3 text-[var(--accent)]" />
-            Bot DM only
+  return (
+    <Card>
+      <CardHeader
+        icon={<Bell className="h-4 w-4" />}
+        iconColor="green"
+        title="Telegram"
+        subtitle={isConnected
+          ? `Connected${connection?.telegramUsername ? ` as @${connection.telegramUsername}` : ""}`
+          : "Not connected"}
+        badge={
+          <span className={`badge ${statusBadge}`}>
+            <span className={`status-dot ${statusDotClass}`} />
+            {statusText}
           </span>
-        </div>
+        }
+      />
+
+      <p className="text-sm text-[var(--text-secondary)] mb-4">
+        {isConnected
+          ? "Smart reminders are delivered via Telegram bot DM."
+          : "Connect the shared bot to receive smart commit reminders."}
+      </p>
+
+      <div className="flex items-center gap-2 mb-4 text-xs text-[var(--text-tertiary)]">
+        <span className="flex items-center gap-1">
+          <MessageCircle className="h-3 w-3 text-[var(--accent)]" />
+          Bot DM only
+        </span>
       </div>
 
       {!isConnected && (
-        <div className="mt-4 space-y-3">
-          <div className="rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.35)] p-4 text-xs text-[var(--muted)]">
-            <p className="text-sm font-semibold text-[var(--text)]">Connect in Telegram</p>
-            <div className="mt-2 space-y-1">
-              <p>1. Tap the button below to open the bot.</p>
-              <p>2. Press Start, then confirm the login.</p>
-              <p>3. Return here for status updates.</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-3">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-inset)] p-4 text-xs text-[var(--text-secondary)] mb-4">
+          <p className="text-sm font-medium text-[var(--text-primary)] mb-2">How to connect</p>
+          <ol className="space-y-1 list-decimal list-inside">
+            <li>Tap &ldquo;Connect Telegram&rdquo; below.</li>
+            <li>Press Start in the bot, then confirm the login.</li>
+            <li>Return here -- status updates automatically.</li>
+          </ol>
+        </div>
+      )}
+
+      {pending && (
+        <div className="info-alert cyan mb-4">
+          Waiting for confirmation in Telegram...
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        {!isConnected && (
+          <>
             <button
               onClick={handleStart}
               disabled={!isSignedIn || loading || Boolean(pending)}
-              className="rounded-full border border-[rgba(183,255,72,0.5)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent)] disabled:opacity-50"
+              className="btn btn-accent btn-sm"
             >
               {loading ? "Opening..." : "Connect Telegram"}
             </button>
             {pending?.url && (
               <button
                 onClick={() => window.open(pending.url, "_blank", "noopener,noreferrer")}
-                className="rounded-full border border-[rgba(255,255,255,0.15)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)]"
+                className="btn btn-sm"
               >
-                <ExternalLink className="mr-2 inline h-3 w-3" />
+                <ExternalLink className="h-3 w-3" />
                 Open bot
               </button>
             )}
-          </div>
-          {pending && (
-            <p className="text-xs text-[var(--muted)]">Waiting for confirmation in Telegram...</p>
-          )}
-        </div>
-      )}
-
-      <div className="mt-4">
-        <div className="flex h-full flex-col rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.35)] p-4 text-sm">
-          <p className="headline text-[10px] uppercase tracking-[0.25em] text-[var(--muted)]">
-            Connection status
-          </p>
-          <div className="mt-3 grid gap-2 text-xs text-[var(--muted)]">
-            <div className="grid min-w-0 items-center gap-3 [grid-template-columns:96px_minmax(0,1fr)]">
-              <span>Status</span>
-              <span className="text-[var(--text)]">
-                {connection?.connected ? "Connected" : pending ? "Waiting" : "Not connected"}
-              </span>
-            </div>
-            <div className="grid min-w-0 items-center gap-3 [grid-template-columns:96px_minmax(0,1fr)]">
-              <span>Alerts</span>
-              <span className="text-[var(--text)]">
-                {connection?.connected ? (connection?.enabled ? "Enabled" : "Paused") : "-"}
-              </span>
-            </div>
-            <div className="grid min-w-0 items-center gap-3 [grid-template-columns:96px_minmax(0,1fr)]">
-              <span>Chat ID</span>
-              <span className="truncate text-[var(--text)]">{connection?.chatId ?? "-"}</span>
-            </div>
-          </div>
-          <div className="mt-auto flex flex-wrap gap-3 pt-4">
+          </>
+        )}
+        {isConnected && (
+          <>
             <button
               onClick={handleTest}
-              disabled={!isSignedIn || !connection?.connected || loading}
-              className="rounded-full border border-[rgba(81,214,255,0.5)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)] disabled:opacity-50"
+              disabled={!isSignedIn || loading}
+              className="btn btn-cyan btn-sm"
             >
-              <Send className="mr-2 inline h-3 w-3" />
+              <Send className="h-3 w-3" />
               {loading ? "Sending..." : "Send test"}
             </button>
-            {connection?.connected && (
-              <button
-                onClick={handleDisconnect}
-                disabled={loading}
-                className="rounded-full border border-[rgba(255,255,255,0.15)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)]"
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
-        </div>
-
-        {status && <p className="mt-3 text-xs text-[var(--muted)]">{status}</p>}
-        {!isSignedIn && (
-          <p className="mt-3 text-xs text-[var(--muted)]">Sign in to connect Telegram.</p>
+            <button
+              onClick={handleDisconnect}
+              disabled={loading}
+              className="btn btn-danger btn-sm"
+            >
+              <Unplug className="h-3 w-3" />
+              Disconnect
+            </button>
+          </>
         )}
       </div>
-    </div>
+
+      {status && <p className="text-xs text-[var(--text-secondary)] mt-3">{status}</p>}
+      {!isSignedIn && <p className="text-xs text-[var(--text-tertiary)] mt-3">Sign in to connect Telegram.</p>}
+    </Card>
   );
 }

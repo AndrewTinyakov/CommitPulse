@@ -2,13 +2,26 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useAction, useMutation } from "convex/react";
-import { GitBranch, ShieldCheck, Timer, Wifi, AlertTriangle, Link as LinkIcon, Copy } from "lucide-react";
+import {
+  GitBranch,
+  ShieldCheck,
+  Timer,
+  Wifi,
+  AlertTriangle,
+  ExternalLink,
+  Copy,
+  ChevronDown,
+  RefreshCw,
+  Globe,
+  Unplug,
+} from "lucide-react";
 import { useAuth } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
 import { api } from "@convex/_generated/api";
+import { Card, CardHeader } from "./ui/card";
 
 function formatDate(timestamp: number | null) {
-  if (!timestamp) return "-";
+  if (!timestamp) return "--";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -30,13 +43,13 @@ export default function GitHubConnectCard() {
   const [status, setStatus] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
   const [setupProcessed, setSetupProcessed] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const isConnected = Boolean(connection?.connected);
   const isGithubApp = connection?.authMode === "github_app";
 
   useEffect(() => {
     if (!isSignedIn || setupProcessed) return;
-
     const setup = searchParams.get("github_setup");
     if (setup !== "ok") return;
 
@@ -69,17 +82,11 @@ export default function GitHubConnectCard() {
         setWorking(false);
         setSetupProcessed(true);
         const next = new URL(window.location.href);
-        [
-          "github_setup",
-          "installation_id",
-          "installation_account_login",
-          "installation_account_type",
-          "repo_selection_mode",
-        ].forEach((key) => next.searchParams.delete(key));
+        ["github_setup", "installation_id", "installation_account_login", "installation_account_type", "repo_selection_mode"]
+          .forEach((key) => next.searchParams.delete(key));
         window.history.replaceState({}, "", next.toString());
       }
     };
-
     void run();
   }, [completeGithubAppSetup, isSignedIn, searchParams, setupProcessed]);
 
@@ -99,12 +106,11 @@ export default function GitHubConnectCard() {
       "This will delete all synced GitHub stats and resync everything from scratch. Continue?",
     );
     if (!confirmed) return;
-
     setWorking(true);
     setStatus(null);
     try {
       await recomputeFromScratch({});
-      setStatus("Recompute started. We deleted existing stats and kicked off a full resync.");
+      setStatus("Recompute started. Deleted existing stats and kicked off a full resync.");
     } finally {
       setWorking(false);
     }
@@ -113,19 +119,15 @@ export default function GitHubConnectCard() {
   const handleCopyStreakDebug = async () => {
     const debugDump = typeof streakDebug?.debugDump === "string" ? streakDebug.debugDump : null;
     if (!debugDump) {
-      if (streakDebug === undefined) {
-        setStatus("Preparing streak debug dump. Try again in a couple of seconds.");
-      } else {
-        setStatus("No streak debug dump available yet.");
-      }
+      setStatus(streakDebug === undefined
+        ? "Preparing streak debug dump. Try again in a couple of seconds."
+        : "No streak debug dump available yet.");
       return;
     }
-
     try {
       await navigator.clipboard.writeText(debugDump);
       setStatus("Streak debug dump copied. Paste it in chat.");
-    } catch (error) {
-      console.error(error);
+    } catch {
       console.log(debugDump);
       setStatus("Clipboard copy failed. Debug dump was printed to browser console.");
     }
@@ -137,7 +139,6 @@ export default function GitHubConnectCard() {
       return;
     }
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-
     setWorking(true);
     setStatus(null);
     try {
@@ -153,14 +154,14 @@ export default function GitHubConnectCard() {
     }
   };
 
-  const statusLabel = useMemo(() => {
-    const syncStatus = connection?.syncStatus;
-    if (!syncStatus) return "Idle";
-    if (syncStatus === "syncing") return "Syncing";
-    if (syncStatus === "error") return "Sync error";
+  const syncLabel = useMemo(() => {
+    if (!connection?.syncStatus) return "Idle";
+    if (connection.syncStatus === "syncing") return "Syncing";
+    if (connection.syncStatus === "error") return "Error";
     return "Idle";
   }, [connection?.syncStatus]);
-  const isFetching = connection?.syncStatus === "syncing";
+
+  const isSyncing = connection?.syncStatus === "syncing";
   const activeBackfillLookbackDays = connection?.activeBackfillLookbackDays ?? null;
   const syncProgressMessage = activeBackfillLookbackDays
     ? `Backfilling (${activeBackfillLookbackDays}d window).`
@@ -168,156 +169,146 @@ export default function GitHubConnectCard() {
       ? "Finalizing streak and syncing recent changes."
       : "Sync complete.";
 
+  const accountName = connection?.installationAccountLogin ?? connection?.login ?? null;
+  const syncDotClass = connection?.syncStatus === "error" ? "error"
+    : connection?.syncStatus === "syncing" ? "syncing"
+    : isConnected ? "online" : "offline";
+
   return (
-    <div className="panel flex h-full flex-col rounded-3xl px-6 py-6" id="github-connect">
-      <div className="flex items-center gap-3">
-        <span className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(81,214,255,0.3)] bg-[rgba(81,214,255,0.12)] text-[var(--accent-2)]">
-          <GitBranch className="h-4 w-4" />
+    <Card>
+      <CardHeader
+        icon={<GitBranch className="h-4 w-4" />}
+        iconColor="cyan"
+        title="GitHub"
+        subtitle={isConnected
+          ? `Connected${accountName ? ` as ${accountName}` : ""}`
+          : "Not connected"}
+        badge={
+          <span className={`badge ${isConnected ? "green" : ""}`}>
+            <span className={`status-dot ${syncDotClass}`} />
+            {isConnected ? syncLabel : "Offline"}
+          </span>
+        }
+      />
+
+      <p className="text-sm text-[var(--text-secondary)] mb-4">
+        {isConnected
+          ? "Sync runs automatically via webhooks and background reconciliation."
+          : "Connect with GitHub App. No personal token required."}
+      </p>
+
+      <div className="flex items-center gap-2 mb-4 text-xs text-[var(--text-tertiary)]">
+        <span className="flex items-center gap-1">
+          <ShieldCheck className="h-3 w-3 text-[var(--accent)]" />
+          Repo-scoped
         </span>
-        <div>
-          <p className="headline text-xs text-[var(--muted)]">GitHub</p>
-          <p className="text-lg font-semibold">App-based sync</p>
-        </div>
+        <span className="text-[var(--border-focus)]">&middot;</span>
+        <span className="flex items-center gap-1">
+          <Timer className="h-3 w-3 text-[var(--accent-2)]" />
+          Near realtime
+        </span>
       </div>
 
-      <div className="mt-4 space-y-3 text-sm text-[var(--muted)]">
-        {!isConnected && <p>Connect with GitHub App. No personal token required.</p>}
-        {isConnected && <p>Sync runs automatically from GitHub webhooks and background reconciliation.</p>}
-        <div className="flex flex-wrap gap-2 text-xs">
-          <span className="flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] px-2 py-1">
-            <ShieldCheck className="h-3 w-3 text-[var(--accent)]" />
-            Repo-scoped permissions
-          </span>
-          <span className="flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] px-2 py-1">
-            <Timer className="h-3 w-3 text-[var(--accent-2)]" />
-            Near realtime updates
-          </span>
+      {isSyncing && (
+        <div className="info-alert cyan mb-4">
+          {syncProgressMessage}
         </div>
-      </div>
+      )}
 
-      <div className="mt-4 flex flex-wrap gap-3">
-        <a
-          href="/api/github/connect"
-          className="rounded-full border border-[rgba(81,214,255,0.5)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)]"
-        >
-          {isConnected ? "Reconnect GitHub" : "Connect GitHub"}
+      {connection?.syncStatus === "error" && connection?.lastErrorMessage && (
+        <div className="info-alert red mb-4">
+          {connection.lastErrorMessage}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <a href="/api/github/connect" className="btn btn-cyan btn-sm">
+          {isConnected ? "Reconnect" : "Connect GitHub"}
         </a>
         <a
           href="https://github.com/settings/installations"
           target="_blank"
           rel="noreferrer"
-          className="rounded-full border border-[rgba(255,255,255,0.2)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)]"
+          className="btn btn-sm"
         >
-          <LinkIcon className="mr-2 inline h-3 w-3" />
-          Manage permissions
+          <ExternalLink className="h-3 w-3" />
+          Permissions
         </a>
         {isConnected && (
-          <button
-            onClick={handleRecompute}
-            disabled={working}
-            className="rounded-full border border-[rgba(81,214,255,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent-2)] disabled:opacity-50"
-          >
-            Recompute stats
-          </button>
-        )}
-        {isConnected && (
-          <button
-            onClick={handleUseBrowserTimezone}
-            disabled={working}
-            className="rounded-full border border-[rgba(183,255,72,0.45)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--accent)] disabled:opacity-50"
-          >
-            Use browser timezone
-          </button>
-        )}
-        {isConnected && (
-          <button
-            onClick={handleCopyStreakDebug}
-            disabled={working || streakDebug === undefined}
-            className="rounded-full border border-[rgba(255,255,255,0.25)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)] disabled:opacity-50"
-          >
-            <Copy className="mr-2 inline h-3 w-3" />
-            Copy streak debug
-          </button>
-        )}
-        {isConnected && (
-          <button
-            onClick={handleDisconnect}
-            disabled={working}
-            className="rounded-full border border-[rgba(255,255,255,0.15)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--text)] disabled:opacity-50"
-          >
-            Disconnect
-          </button>
+          <>
+            <button onClick={handleRecompute} disabled={working} className="btn btn-sm">
+              <RefreshCw className="h-3 w-3" />
+              Recompute
+            </button>
+            <button onClick={handleUseBrowserTimezone} disabled={working} className="btn btn-sm">
+              <Globe className="h-3 w-3" />
+              Browser TZ
+            </button>
+            <button onClick={handleCopyStreakDebug} disabled={working || streakDebug === undefined} className="btn btn-sm">
+              <Copy className="h-3 w-3" />
+              Debug
+            </button>
+            <button onClick={handleDisconnect} disabled={working} className="btn btn-danger btn-sm">
+              <Unplug className="h-3 w-3" />
+              Disconnect
+            </button>
+          </>
         )}
       </div>
 
-      <div className="mt-4 flex h-full flex-col rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.35)] p-4 text-sm">
-        <p className="headline text-[10px] uppercase tracking-[0.25em] text-[var(--muted)]">Connection status</p>
-        <div className="mt-3 grid gap-2 text-xs text-[var(--muted)]">
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Status</span>
-            <span className="truncate text-[var(--text)]">
-              {isConnected
-                ? `${connection?.installationAccountLogin ?? connection?.login ?? "GitHub"} connected`
-                : "Not connected"}
-            </span>
-          </div>
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Auth mode</span>
-            <span className="text-[var(--text)]">{isGithubApp ? "GitHub App" : connection?.authMode ?? "-"}</span>
-          </div>
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Repo scope</span>
-            <span className="text-[var(--text)]">
-              {connection?.repoSelectionMode === "all" ? "All repos" : connection?.repoSelectionMode === "selected" ? "Selected repos" : "-"}
-            </span>
-          </div>
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Sync state</span>
-            <span className="text-[var(--text)]">
-              {connection?.syncStatus === "error" ? (
-                <span className="inline-flex items-center gap-1 text-red-300">
-                  <AlertTriangle className="h-3 w-3" />
-                  {statusLabel}
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1">
-                  <Wifi className="h-3 w-3 text-[var(--accent)]" />
-                  {statusLabel}
-                </span>
-              )}
-            </span>
-          </div>
-          {isFetching && (
-            <div className="rounded-lg border border-[rgba(81,214,255,0.35)] bg-[rgba(81,214,255,0.1)] px-3 py-2 text-[11px] text-[var(--text)]">
-              {syncProgressMessage}
+      {isConnected && (
+        <div className="details-accordion">
+          <button
+            className="details-trigger"
+            onClick={() => setDetailsOpen(!detailsOpen)}
+            aria-expanded={detailsOpen}
+          >
+            <ChevronDown className="h-3 w-3 chevron" />
+            Technical details
+          </button>
+          <div className={`details-content ${detailsOpen ? "open" : ""}`}>
+            <div className="mt-3 space-y-0.5">
+              <DetailRow label="Auth mode" value={isGithubApp ? "GitHub App" : connection?.authMode ?? "--"} />
+              <DetailRow
+                label="Repo scope"
+                value={connection?.repoSelectionMode === "all" ? "All repos"
+                  : connection?.repoSelectionMode === "selected" ? "Selected repos"
+                  : "--"}
+              />
+              <DetailRow label="Sync state" value={syncLabel} icon={
+                connection?.syncStatus === "error"
+                  ? <AlertTriangle className="h-3 w-3 text-[var(--danger)]" />
+                  : <Wifi className="h-3 w-3 text-[var(--accent)]" />
+              } />
+              <DetailRow label="Last sync" value={connection?.lastSync ?? "--"} />
+              <DetailRow label="Last webhook" value={formatDate(connection?.lastWebhookAt ?? null)} />
+              <DetailRow
+                label="Synced range"
+                value={
+                  connection?.syncedFromAt || connection?.syncedToAt
+                    ? `${formatDate(connection?.syncedFromAt ?? null)} - ${formatDate(connection?.syncedToAt ?? null)}`
+                    : "--"
+                }
+              />
             </div>
-          )}
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Last sync</span>
-            <span className="text-[var(--text)] tabular-nums">{connection?.lastSync ?? "-"}</span>
           </div>
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Last webhook</span>
-            <span className="text-[var(--text)] tabular-nums">{formatDate(connection?.lastWebhookAt ?? null)}</span>
-          </div>
-          <div className="grid min-w-0 items-center gap-3 [grid-template-columns:128px_minmax(0,1fr)]">
-            <span>Synced range</span>
-            <span className="text-[var(--text)]">
-              {connection?.syncedFromAt || connection?.syncedToAt
-                ? `${formatDate(connection?.syncedFromAt ?? null)} to ${formatDate(connection?.syncedToAt ?? null)}`
-                : "-"}
-            </span>
-          </div>
-          {connection?.syncStatus === "error" && connection?.lastErrorMessage && (
-            <div className="rounded-lg border border-[rgba(255,80,80,0.35)] bg-[rgba(255,80,80,0.08)] px-3 py-2 text-[11px] text-red-200">
-              {connection.lastErrorMessage}
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
-      {status && <p className="mt-3 text-xs text-[var(--muted)]">{status}</p>}
-      {!isSignedIn && <p className="mt-3 text-xs text-[var(--muted)]">Sign in to connect GitHub.</p>}
+      {status && <p className="text-xs text-[var(--text-secondary)] mt-3">{status}</p>}
+      {!isSignedIn && <p className="text-xs text-[var(--text-tertiary)] mt-3">Sign in to connect GitHub.</p>}
+    </Card>
+  );
+}
+
+function DetailRow({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) {
+  return (
+    <div className="data-row">
+      <span className="data-label">{label}</span>
+      <span className="data-value flex items-center gap-1.5">
+        {icon}
+        {value}
+      </span>
     </div>
   );
 }
