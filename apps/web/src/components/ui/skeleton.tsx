@@ -17,6 +17,8 @@ export function SkeletonMetricCard() {
 }
 
 export function SkeletonCard({ lines = 3 }: { lines?: number }) {
+  const lineWidths = ["82%", "90%", "76%", "94%", "88%"] as const;
+
   return (
     <div className="card">
       <div className="flex items-center gap-3 mb-4">
@@ -28,7 +30,7 @@ export function SkeletonCard({ lines = 3 }: { lines?: number }) {
       </div>
       <div className="space-y-3">
         {Array.from({ length: lines }).map((_, i) => (
-          <SkeletonLine key={i} width={`${70 + Math.random() * 30}%`} />
+          <SkeletonLine key={i} width={lineWidths[i % lineWidths.length]} />
         ))}
       </div>
     </div>
